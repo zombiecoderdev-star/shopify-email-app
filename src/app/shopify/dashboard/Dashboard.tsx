@@ -6,7 +6,7 @@ import {
   TrendingUp, ArrowUpRight, Settings
 } from "lucide-react";
 
-export default function DashboardPage() {
+export default function Dashboard() {
   const shopify = useAppBridge();
 
   function showToast() {
@@ -49,26 +49,23 @@ export default function DashboardPage() {
       {/* Main Grid */}
       <div className="grid grid-cols-3 gap-4">
 
-        {/* Left: Sandbox Simulation — spans 2 cols */}
         <div className="col-span-2 space-y-4">
-
           <div className="bg-white rounded-xl border border-gray-200 p-5">
             <div className="flex items-center gap-2 mb-1">
               <span className="text-lg">✨</span>
               <h2 className="font-semibold text-gray-900">Shopify Sandbox Simulation Board</h2>
             </div>
             <p className="text-xs text-gray-400 mb-4">
-              Manually simulate Shopify webhooks or step automation flows forward using the quick-actions below.
+              Manually simulate Shopify webhooks or step automation flows forward.
             </p>
             <div className="grid grid-cols-2 gap-4">
-              {/* Webhooks */}
               <div className="border border-gray-200 rounded-lg p-4">
                 <div className="flex items-center gap-2 mb-1">
                   <div className="w-2 h-2 rounded-full bg-green-400" />
                   <p className="text-sm font-medium text-gray-800">Shopify Store Webhooks</p>
                 </div>
                 <p className="text-xs text-gray-400 mb-3">
-                  Simulates a shopper action in Shopify and sends real-time webhook payloads to our server.
+                  Simulates a shopper action and sends real-time webhook payloads.
                 </p>
                 <div className="flex gap-2">
                   <button className="px-3 py-1.5 bg-gray-900 text-white text-xs rounded-md hover:bg-gray-700">
@@ -79,14 +76,13 @@ export default function DashboardPage() {
                   </button>
                 </div>
               </div>
-              {/* Flow Queue */}
               <div className="border border-gray-200 rounded-lg p-4">
                 <div className="flex items-center gap-2 mb-1">
                   <div className="w-2 h-2 rounded-full bg-blue-400" />
                   <p className="text-sm font-medium text-gray-800">Background Automation Queue</p>
                 </div>
                 <p className="text-xs text-gray-400 mb-3">
-                  Forces the waiting customer queues to tick 1 step forward, executing delays and dispatching email blocks.
+                  Forces the waiting customer queues to tick 1 step forward.
                 </p>
                 <button className="w-full px-3 py-1.5 bg-blue-600 text-white text-xs rounded-md hover:bg-blue-700">
                   Step Flow Queue Forward (Tick Engine)
@@ -95,7 +91,6 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* ROI */}
           <div className="bg-white rounded-xl border border-gray-200 p-5">
             <div className="flex items-center gap-2 mb-4">
               <TrendingUp size={16} className="text-green-500" />
@@ -107,13 +102,9 @@ export default function DashboardPage() {
               <ROIStat label="Revenue Recov" value="$2,450.00" note="via Welcome Series" />
             </div>
           </div>
-
         </div>
 
-        {/* Right col */}
         <div className="space-y-4">
-
-          {/* Usage Credits */}
           <div className="bg-white rounded-xl border border-gray-200 p-5">
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-semibold text-gray-900">Usage Credit Balances</h2>
@@ -134,7 +125,6 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* Delivery Pipeline */}
           <div className="bg-white rounded-xl border border-gray-200 p-5">
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-semibold text-gray-900">Delivery Pipeline</h2>
@@ -149,7 +139,6 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* Quick links */}
           <div className="bg-white rounded-xl border border-gray-200 p-5">
             <h2 className="font-semibold text-gray-900 mb-3">Quick Setup</h2>
             <div className="space-y-2">
@@ -159,7 +148,6 @@ export default function DashboardPage() {
               <QuickLink label="Create your first campaign" />
             </div>
           </div>
-
         </div>
       </div>
     </div>
