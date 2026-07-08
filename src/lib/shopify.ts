@@ -79,3 +79,72 @@ export async function exchangeCodeForToken(shop: string, code: string) {
 export function isValidShopDomain(shop: string) {
   return /^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/.test(shop);
 }
+
+
+// Fetches a single page of customers from Shopify Admin REST API.
+// Returns customers array + the next page_info cursor (null if last page).
+export async function fetchShopifyCustomers(
+  shop: string,
+  accessToken: string,
+  pageInfo?: string
+) {
+  const params = new URLSearchParams({
+    limit: "250", // max allowed per request
+    fields: "id,email,first_name,last_name,phone,tags,total_spent,orders_count,created_at,updated_at,email_marketing_consent",
+  });
+
+  if (pageInfo) {
+    params.set("page_info", pageInfo);
+  }
+
+  const res = await fetch(
+    `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/customers.json?${params}`,
+    {
+      headers: {
+        "X-Shopify-Access-Token": accessToken,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+
+  if (!res.ok) {
+    throw new Error(`Shopify customers fetch failed: ${res.status} ${await res.text()}`);
+  }
+
+  // Shopify uses Link header for pagination cursor
+  const linkHeader = res.headers.get("Link") || "";
+  const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&]*).*?>; rel="next"/);
+  const nextPageInfo = nextMatch ? nextMatch[1] : null;
+
+  const data = await res.json();
+  return { customers: data.customers, nextPageInfo };
+}
+
+// Registers a webhook with Shopify so they call us when events happen.
+export async function registerWebhook(
+  shop: string,
+  accessToken: string,
+  topic: string,
+  address: string
+) {
+  const res = await fetch(
+    `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/webhooks.json`,
+    {
+      method: "POST",
+      headers: {
+        "X-Shopify-Access-Token": accessToken,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        webhook: { topic, address, format: "json" },
+      }),
+    }
+  );
+
+  // 422 means webhook already exists — that's fine, not an error
+  if (!res.ok && res.status !== 422) {
+    throw new Error(`Webhook registration failed: ${res.status} ${await res.text()}`);
+  }
+
+  return res.json();
+}
