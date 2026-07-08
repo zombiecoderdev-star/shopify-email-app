@@ -3,10 +3,12 @@
 import { useState, useEffect } from "react";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import {
-  Search, RefreshCw, Plus, Filter,
+  Search, RefreshCw, Plus, Filter, Upload,
   ChevronUp, ChevronDown, ChevronsUpDown,
 } from "lucide-react";
 import AddCustomerModal from "@/components/AddCustomerModal";
+import ImportExportModal from "@/components/ImportExportModal";
+import Pagination, { usePagination } from "@/components/Pagination";
 
 type Contact = {
   id: string;
@@ -49,6 +51,7 @@ export default function Customers() {
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>(null);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showImportExport, setShowImportExport] = useState(false);
 
   const shop = new URLSearchParams(window.location.search).get("shop") || "";
 
@@ -111,7 +114,8 @@ export default function Customers() {
     });
   }
 
-  const filtered = getSorted(
+  // Filter pipeline: segment → search → sort
+  const processed = getSorted(
     contacts
       .filter(SEGMENTS[activeSegment].filter)
       .filter((c) => {
@@ -124,6 +128,16 @@ export default function Customers() {
         );
       })
   );
+
+  // Pagination — resets to page 1 when search/segment/sort changes
+  const { page, perPage, setPage, setPerPage, paginate } = usePagination(
+    processed.length,
+    [search, activeSegment, sortKey, sortDir]
+  );
+  const paginated = paginate(processed);
+
+  const toast = (msg: string, opts?: { isError?: boolean }) =>
+    shopify.toast.show(msg, opts);
 
   return (
     <div className="p-6">
@@ -138,8 +152,15 @@ export default function Customers() {
         </div>
         <div className="flex items-center gap-2">
           <button
+            onClick={() => setShowImportExport(true)}
+            className="flex items-center gap-1.5 px-3 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            <Upload size={14} />
+            Import / Export
+          </button>
+          <button
             onClick={() => setShowAddModal(true)}
-            className="flex items-center gap-1.5 px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors"
+            className="flex items-center gap-1.5 px-3 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors"
           >
             <Plus size={14} />
             Add Customer
@@ -208,7 +229,9 @@ export default function Customers() {
         </div>
 
         {/* Right panel */}
-        <div className="flex-1 bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <div className="flex-1 bg-white rounded-xl border border-gray-200 overflow-hidden flex flex-col">
+
+          {/* Search */}
           <div className="p-3 border-b border-gray-100">
             <div className="relative">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -222,91 +245,112 @@ export default function Customers() {
             </div>
           </div>
 
-          {loading ? (
-            <div className="p-16 text-center text-gray-400 text-sm">Loading contacts...</div>
-          ) : filtered.length === 0 ? (
-            <div className="p-16 text-center text-gray-400 text-sm">
-              No customers found matching the search or segment criteria.
-            </div>
-          ) : (
-            <table className="w-full text-sm">
-              <thead className="border-b border-gray-100">
-                <tr>
-                  {COLUMNS.map(({ label, key }) => (
-                    <th key={label} className="text-left px-4 py-3">
-                      {key ? (
-                        <button
-                          onClick={() => handleSort(key)}
-                          className="flex items-center gap-1 group text-xs font-semibold text-gray-400 uppercase tracking-wide hover:text-gray-700 transition-colors"
-                        >
-                          {label}
-                          <SortIcon active={sortKey === key} dir={sortKey === key ? sortDir : null} />
-                        </button>
-                      ) : (
-                        <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
-                          {label}
-                        </span>
-                      )}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-50">
-                {filtered.map((c) => (
-                  <tr key={c.id} className="hover:bg-gray-50 transition-colors">
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2.5">
-                        <div className="w-7 h-7 rounded-full bg-green-100 flex items-center justify-center text-xs font-bold text-green-700 flex-shrink-0">
-                          {(c.first_name?.[0] || c.email?.[0] || "?").toUpperCase()}
-                        </div>
-                        <div>
-                          <p className="font-medium text-gray-900">
-                            {[c.first_name, c.last_name].filter(Boolean).join(" ") || "—"}
-                          </p>
-                          <p className="text-xs text-gray-400">{c.email}</p>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`inline-flex px-2 py-0.5 rounded text-xs font-semibold ${
-                        c.subscribed ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"
-                      }`}>
-                        {c.subscribed ? "SUBSCRIBED" : "UNSUBSCRIBED"}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex flex-wrap gap-1">
-                        {c.tags?.length > 0
-                          ? c.tags.slice(0, 2).map((tag) => (
-                              <span key={tag} className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-xs rounded">
-                                {tag}
-                              </span>
-                            ))
-                          : <span className="text-gray-300 text-xs">—</span>
-                        }
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 text-gray-400 text-xs font-mono">
-                      #{c.shopify_customer_id}
-                    </td>
-                    <td className="px-4 py-3 text-gray-500 text-xs">
-                      {c.orders_count} orders / ${parseFloat(String(c.total_spent)).toFixed(2)}
-                    </td>
+          {/* Table */}
+          <div className="flex-1">
+            {loading ? (
+              <div className="p-16 text-center text-gray-400 text-sm">Loading contacts...</div>
+            ) : paginated.length === 0 ? (
+              <div className="p-16 text-center text-gray-400 text-sm">
+                No customers found matching the search or segment criteria.
+              </div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="border-b border-gray-100">
+                  <tr>
+                    {COLUMNS.map(({ label, key }) => (
+                      <th key={label} className="text-left px-4 py-3">
+                        {key ? (
+                          <button
+                            onClick={() => handleSort(key)}
+                            className="flex items-center gap-1 group text-xs font-semibold text-gray-400 uppercase tracking-wide hover:text-gray-700 transition-colors"
+                          >
+                            {label}
+                            <SortIcon active={sortKey === key} dir={sortKey === key ? sortDir : null} />
+                          </button>
+                        ) : (
+                          <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
+                            {label}
+                          </span>
+                        )}
+                      </th>
+                    ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {paginated.map((c) => (
+                    <tr key={c.id} className="hover:bg-gray-50 transition-colors">
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-7 h-7 rounded-full bg-green-100 flex items-center justify-center text-xs font-bold text-green-700 flex-shrink-0">
+                            {(c.first_name?.[0] || c.email?.[0] || "?").toUpperCase()}
+                          </div>
+                          <div>
+                            <p className="font-medium text-gray-900">
+                              {[c.first_name, c.last_name].filter(Boolean).join(" ") || "—"}
+                            </p>
+                            <p className="text-xs text-gray-400">{c.email}</p>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex px-2 py-0.5 rounded text-xs font-semibold ${
+                          c.subscribed ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"
+                        }`}>
+                          {c.subscribed ? "SUBSCRIBED" : "UNSUBSCRIBED"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap gap-1">
+                          {c.tags?.length > 0
+                            ? c.tags.slice(0, 2).map((tag) => (
+                                <span key={tag} className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-xs rounded">
+                                  {tag}
+                                </span>
+                              ))
+                            : <span className="text-gray-300 text-xs">—</span>
+                          }
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-gray-400 text-xs font-mono">
+                        #{c.shopify_customer_id}
+                      </td>
+                      <td className="px-4 py-3 text-gray-500 text-xs">
+                        {c.orders_count} orders / ${parseFloat(String(c.total_spent)).toFixed(2)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Pagination */}
+          <Pagination
+            page={page}
+            perPage={perPage}
+            total={processed.length}
+            onPageChange={setPage}
+            onPerPageChange={setPerPage}
+          />
         </div>
       </div>
 
-      {/* Add Customer Modal */}
+      {/* Modals */}
       {showAddModal && (
         <AddCustomerModal
           shop={shop}
           onClose={() => setShowAddModal(false)}
           onSuccess={loadContacts}
-          showToast={(msg, opts) => shopify.toast.show(msg, opts)}
+          showToast={toast}
+        />
+      )}
+      {showImportExport && (
+        <ImportExportModal
+          shop={shop}
+          contacts={contacts}
+          onClose={() => setShowImportExport(false)}
+          onImportDone={loadContacts}
+          showToast={toast}
         />
       )}
     </div>
