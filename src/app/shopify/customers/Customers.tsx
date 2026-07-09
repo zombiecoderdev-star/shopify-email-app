@@ -5,9 +5,13 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import {
   Search, RefreshCw, Plus, Filter, Upload,
   ChevronUp, ChevronDown, ChevronsUpDown,
+  Eye, Pencil, Trash2,
 } from "lucide-react";
 import AddCustomerModal from "@/components/AddCustomerModal";
 import ImportExportModal from "@/components/ImportExportModal";
+import ViewCustomerPanel from "@/components/ViewCustomerPanel";
+import UpdateCustomerModal from "@/components/UpdateCustomerModal";
+import DeleteConfirmModal from "@/components/DeleteConfirmModal";
 import Pagination, { usePagination } from "@/components/Pagination";
 
 type Contact = {
@@ -15,11 +19,14 @@ type Contact = {
   email: string;
   first_name: string | null;
   last_name: string | null;
+  phone: string | null;
   orders_count: number;
   total_spent: number;
   subscribed: boolean;
   tags: string[];
   shopify_customer_id: string;
+  created_at?: string;
+  last_order_at?: string | null;
 };
 
 type SortKey = "name" | "status" | "orders_count" | "total_spent";
@@ -50,10 +57,22 @@ export default function Customers() {
   const [activeSegment, setActiveSegment] = useState(0);
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>(null);
+
+  // Modal/panel state
   const [showAddModal, setShowAddModal] = useState(false);
   const [showImportExport, setShowImportExport] = useState(false);
+  const [viewContact, setViewContact] = useState<Contact | null>(null);
+  const [updateContact, setUpdateContact] = useState<Contact | null>(null);
+  const [deleteContact, setDeleteContact] = useState<Contact | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  // Multi-select state
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [showBulkDelete, setShowBulkDelete] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   const shop = new URLSearchParams(window.location.search).get("shop") || "";
+  const toast = (msg: string, opts?: { isError?: boolean }) => shopify.toast.show(msg, opts);
 
   async function loadContacts() {
     setLoading(true);
@@ -62,7 +81,7 @@ export default function Customers() {
       const data = await res.json();
       setContacts(data.contacts || []);
     } catch {
-      shopify.toast.show("Failed to load contacts", { isError: true });
+      toast("Failed to load contacts", { isError: true });
     } finally {
       setLoading(false);
     }
@@ -78,15 +97,65 @@ export default function Customers() {
       });
       const data = await res.json();
       if (data.success) {
-        shopify.toast.show(`Synced ${data.synced} customers ✅`);
+        toast(`Synced ${data.synced} customers ✅`);
         await loadContacts();
       } else {
-        shopify.toast.show("Sync failed: " + data.error, { isError: true });
+        toast("Sync failed: " + data.error, { isError: true });
       }
     } catch {
-      shopify.toast.show("Sync failed", { isError: true });
+      toast("Sync failed", { isError: true });
     } finally {
       setSyncing(false);
+    }
+  }
+
+  async function handleDelete(contact: Contact) {
+    setDeleting(true);
+    try {
+      const res = await fetch("/api/shopify/customers/delete", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ shop, shopify_customer_id: contact.shopify_customer_id }),
+      });
+      if (res.ok) {
+        toast("Customer deleted ✅");
+        setContacts((prev) => prev.filter((c) => c.id !== contact.id));
+        setSelected((prev) => { const s = new Set(prev); s.delete(contact.id); return s; });
+      } else {
+        toast("Delete failed", { isError: true });
+      }
+    } catch {
+      toast("Delete failed", { isError: true });
+    } finally {
+      setDeleting(false);
+      setDeleteContact(null);
+    }
+  }
+
+  async function handleBulkDelete() {
+    setBulkDeleting(true);
+    const ids = contacts
+      .filter((c) => selected.has(c.id))
+      .map((c) => c.shopify_customer_id);
+    try {
+      const res = await fetch("/api/shopify/customers/bulk-delete", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ shop, shopify_customer_ids: ids }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        toast(`Deleted ${data.succeeded} customers ✅`);
+        setContacts((prev) => prev.filter((c) => !selected.has(c.id)));
+        setSelected(new Set());
+      } else {
+        toast("Bulk delete failed", { isError: true });
+      }
+    } catch {
+      toast("Bulk delete failed", { isError: true });
+    } finally {
+      setBulkDeleting(false);
+      setShowBulkDelete(false);
     }
   }
 
@@ -114,7 +183,6 @@ export default function Customers() {
     });
   }
 
-  // Filter pipeline: segment → search → sort
   const processed = getSorted(
     contacts
       .filter(SEGMENTS[activeSegment].filter)
@@ -129,15 +197,42 @@ export default function Customers() {
       })
   );
 
-  // Pagination — resets to page 1 when search/segment/sort changes
   const { page, perPage, setPage, setPerPage, paginate } = usePagination(
     processed.length,
     [search, activeSegment, sortKey, sortDir]
   );
   const paginated = paginate(processed);
 
-  const toast = (msg: string, opts?: { isError?: boolean }) =>
-    shopify.toast.show(msg, opts);
+  // Select all on current page
+  const allCurrentSelected =
+    paginated.length > 0 && paginated.every((c) => selected.has(c.id));
+  const someCurrentSelected = paginated.some((c) => selected.has(c.id));
+
+  function toggleSelectAll() {
+    if (allCurrentSelected) {
+      // Deselect current page
+      setSelected((prev) => {
+        const s = new Set(prev);
+        paginated.forEach((c) => s.delete(c.id));
+        return s;
+      });
+    } else {
+      // Select current page
+      setSelected((prev) => {
+        const s = new Set(prev);
+        paginated.forEach((c) => s.add(c.id));
+        return s;
+      });
+    }
+  }
+
+  function toggleOne(id: string) {
+    setSelected((prev) => {
+      const s = new Set(prev);
+      s.has(id) ? s.delete(id) : s.add(id);
+      return s;
+    });
+  }
 
   return (
     <div className="p-6">
@@ -197,19 +292,15 @@ export default function Customers() {
                 return (
                   <button
                     key={i}
-                    onClick={() => setActiveSegment(i)}
+                    onClick={() => { setActiveSegment(i); setSelected(new Set()); }}
                     className={`w-full flex items-center justify-between px-4 py-2.5 text-sm transition-colors ${
-                      active
-                        ? "bg-blue-50 text-blue-700 font-medium"
-                        : "text-gray-600 hover:bg-gray-50"
+                      active ? "bg-blue-50 text-blue-700 font-medium" : "text-gray-600 hover:bg-gray-50"
                     }`}
                   >
                     <span>{seg.label}</span>
                     <span className={`text-xs px-1.5 py-0.5 rounded-full ${
                       active ? "bg-blue-100 text-blue-600" : "bg-gray-100 text-gray-400"
-                    }`}>
-                      {count}
-                    </span>
+                    }`}>{count}</span>
                   </button>
                 );
               })}
@@ -245,6 +336,30 @@ export default function Customers() {
             </div>
           </div>
 
+          {/* Bulk action bar */}
+          {selected.size > 0 && (
+            <div className="flex items-center justify-between px-4 py-2.5 bg-blue-50 border-b border-blue-100">
+              <p className="text-xs font-medium text-blue-700">
+                {selected.size} customer{selected.size > 1 ? "s" : ""} selected
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setSelected(new Set())}
+                  className="text-xs text-blue-500 hover:text-blue-700"
+                >
+                  Deselect all
+                </button>
+                <button
+                  onClick={() => setShowBulkDelete(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500 text-white text-xs font-medium rounded-lg hover:bg-red-600 transition-colors"
+                >
+                  <Trash2 size={12} />
+                  Delete selected
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Table */}
           <div className="flex-1">
             {loading ? (
@@ -257,6 +372,18 @@ export default function Customers() {
               <table className="w-full text-sm">
                 <thead className="border-b border-gray-100">
                   <tr>
+                    {/* Select all checkbox */}
+                    <th className="pl-4 py-3 w-8">
+                      <input
+                        type="checkbox"
+                        checked={allCurrentSelected}
+                        ref={(el) => {
+                          if (el) el.indeterminate = someCurrentSelected && !allCurrentSelected;
+                        }}
+                        onChange={toggleSelectAll}
+                        className="accent-green-600 w-3.5 h-3.5 cursor-pointer"
+                      />
+                    </th>
                     {COLUMNS.map(({ label, key }) => (
                       <th key={label} className="text-left px-4 py-3">
                         {key ? (
@@ -268,17 +395,33 @@ export default function Customers() {
                             <SortIcon active={sortKey === key} dir={sortKey === key ? sortDir : null} />
                           </button>
                         ) : (
-                          <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
-                            {label}
-                          </span>
+                          <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide">{label}</span>
                         )}
                       </th>
                     ))}
+                    {/* Actions column */}
+                    <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wide text-right">
+                      Actions
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
                   {paginated.map((c) => (
-                    <tr key={c.id} className="hover:bg-gray-50 transition-colors">
+                    <tr
+                      key={c.id}
+                      className={`hover:bg-gray-50 transition-colors ${
+                        selected.has(c.id) ? "bg-blue-50/50" : ""
+                      }`}
+                    >
+                      {/* Row checkbox */}
+                      <td className="pl-4 py-3 w-8">
+                        <input
+                          type="checkbox"
+                          checked={selected.has(c.id)}
+                          onChange={() => toggleOne(c.id)}
+                          className="accent-green-600 w-3.5 h-3.5 cursor-pointer"
+                        />
+                      </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2.5">
                           <div className="w-7 h-7 rounded-full bg-green-100 flex items-center justify-center text-xs font-bold text-green-700 flex-shrink-0">
@@ -317,6 +460,32 @@ export default function Customers() {
                       <td className="px-4 py-3 text-gray-500 text-xs">
                         {c.orders_count} orders / ${parseFloat(String(c.total_spent)).toFixed(2)}
                       </td>
+                      {/* Action buttons */}
+                      <td className="px-4 py-3">
+                        <div className="flex items-center justify-end gap-1">
+                          <ActionBtn
+                            title="View details"
+                            onClick={() => setViewContact(c)}
+                            className="hover:bg-blue-50 hover:text-blue-600"
+                          >
+                            <Eye size={14} />
+                          </ActionBtn>
+                          <ActionBtn
+                            title="Edit customer"
+                            onClick={() => setUpdateContact(c)}
+                            className="hover:bg-green-50 hover:text-green-600"
+                          >
+                            <Pencil size={14} />
+                          </ActionBtn>
+                          <ActionBtn
+                            title="Delete customer"
+                            onClick={() => setDeleteContact(c)}
+                            className="hover:bg-red-50 hover:text-red-500"
+                          >
+                            <Trash2 size={14} />
+                          </ActionBtn>
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -335,7 +504,8 @@ export default function Customers() {
         </div>
       </div>
 
-      {/* Modals */}
+      {/* ── Modals & Panels ── */}
+
       {showAddModal && (
         <AddCustomerModal
           shop={shop}
@@ -344,6 +514,7 @@ export default function Customers() {
           showToast={toast}
         />
       )}
+
       {showImportExport && (
         <ImportExportModal
           shop={shop}
@@ -353,7 +524,75 @@ export default function Customers() {
           showToast={toast}
         />
       )}
+
+      {/* View panel — slides in from right */}
+      {viewContact && (
+        <ViewCustomerPanel
+          contact={viewContact}
+          onClose={() => setViewContact(null)}
+          onUpdate={(c) => {
+            setViewContact(null);
+            setUpdateContact(c);
+          }}
+        />
+      )}
+
+      {/* Update modal */}
+      {updateContact && (
+        <UpdateCustomerModal
+          shop={shop}
+          contact={updateContact}
+          onClose={() => setUpdateContact(null)}
+          onSuccess={(updated) => {
+            setContacts((prev) =>
+              prev.map((c) => (c.id === updated.id ? { ...c, ...updated } : c))
+            );
+          }}
+          showToast={toast}
+        />
+      )}
+
+      {/* Single delete confirm */}
+      {deleteContact && (
+        <DeleteConfirmModal
+          title="Delete Customer?"
+          message={`${[deleteContact.first_name, deleteContact.last_name].filter(Boolean).join(" ") || deleteContact.email} will be permanently deleted from Shopify and your contacts list. This cannot be undone.`}
+          confirmLabel="Delete Customer"
+          loading={deleting}
+          onConfirm={() => handleDelete(deleteContact)}
+          onCancel={() => setDeleteContact(null)}
+        />
+      )}
+
+      {/* Bulk delete confirm */}
+      {showBulkDelete && (
+        <DeleteConfirmModal
+          title={`Delete ${selected.size} Customers?`}
+          message={`All ${selected.size} selected customers will be permanently deleted from Shopify and your contacts list. This cannot be undone.`}
+          confirmLabel={`Delete ${selected.size} Customers`}
+          loading={bulkDeleting}
+          onConfirm={handleBulkDelete}
+          onCancel={() => setShowBulkDelete(false)}
+        />
+      )}
     </div>
+  );
+}
+
+function ActionBtn({ children, onClick, title, className }: {
+  children: React.ReactNode;
+  onClick: () => void;
+  title: string;
+  className?: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className={`w-7 h-7 flex items-center justify-center rounded-md text-gray-400 transition-colors ${className}`}
+    >
+      {children}
+    </button>
   );
 }
 
