@@ -1,7 +1,6 @@
 "use client";
 
-import { X, Mail, Phone, ShoppingBag, Calendar, Tag, Edit2, Crown } from "lucide-react";
-import { getMembership } from "@/config/memberships";
+import { X, Mail, Phone, ShoppingBag, Calendar, Tag, Edit2 } from "lucide-react";
 
 type Contact = {
   id: string;
@@ -14,8 +13,6 @@ type Contact = {
   subscribed: boolean;
   tags: string[];
   shopify_customer_id: string;
-  membership_id: number;
-  subscription_date: string | null;
   created_at?: string;
   last_order_at?: string | null;
 };
@@ -24,79 +21,53 @@ type Props = {
   contact: Contact;
   onClose: () => void;
   onUpdate: (contact: Contact) => void;
-  onChangeMembership: (contact: Contact) => void;
 };
 
-export default function ViewCustomerPanel({ contact, onClose, onUpdate, onChangeMembership }: Props) {
+export default function ViewCustomerPanel({ contact, onClose, onUpdate }: Props) {
   const fullName = [contact.first_name, contact.last_name].filter(Boolean).join(" ") || "No name";
   const initials = (contact.first_name?.[0] || contact.email[0]).toUpperCase();
-  const membership = getMembership(contact.membership_id ?? 0);
 
   return (
     <>
-      <div className="fixed inset-0 bg-black/20 z-40" onClick={onClose} />
+      {/* Backdrop */}
+      <div
+        className="fixed inset-0 bg-black/20 z-40"
+        onClick={onClose}
+      />
+
+      {/* Slide-in panel */}
       <div className="fixed right-0 top-0 h-full w-96 bg-white shadow-2xl z-50 flex flex-col">
 
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <h2 className="text-sm font-bold text-gray-900">Customer Details</h2>
-          <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100">
+          <button
+            onClick={onClose}
+            className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors"
+          >
             <X size={15} className="text-gray-400" />
           </button>
         </div>
 
+        {/* Scrollable body */}
         <div className="flex-1 overflow-auto p-5 space-y-5">
 
-          {/* Avatar + name + status */}
+          {/* Avatar + name */}
           <div className="flex items-center gap-4">
             <div className="w-14 h-14 rounded-full bg-green-100 flex items-center justify-center text-xl font-bold text-green-700 flex-shrink-0">
               {initials}
             </div>
-            <div className="space-y-1">
+            <div>
               <p className="text-lg font-bold text-gray-900">{fullName}</p>
-              <div className="flex items-center gap-2">
-                <span className={`inline-flex px-2 py-0.5 rounded text-xs font-semibold ${
-                  contact.subscribed ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"
-                }`}>
-                  {contact.subscribed ? "SUBSCRIBED" : "UNSUBSCRIBED"}
-                </span>
-                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold ${membership.badgeClass}`}>
-                  <Crown size={10} />
-                  {membership.name}
-                </span>
-              </div>
+              <span className={`inline-flex px-2 py-0.5 rounded text-xs font-semibold ${
+                contact.subscribed
+                  ? "bg-green-100 text-green-700"
+                  : "bg-gray-100 text-gray-500"
+              }`}>
+                {contact.subscribed ? "SUBSCRIBED" : "UNSUBSCRIBED"}
+              </span>
             </div>
           </div>
-
-          {/* Membership section */}
-          <Section title="Membership">
-            <div className="bg-gray-50 rounded-lg p-3 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-gray-500">Current tier</span>
-                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold ${membership.badgeClass}`}>
-                  <Crown size={10} />
-                  {membership.name}
-                </span>
-              </div>
-              {contact.subscription_date && (
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-gray-500">Since</span>
-                  <span className="text-xs font-medium text-gray-700">
-                    {new Date(contact.subscription_date).toLocaleDateString("en-US", {
-                      year: "numeric", month: "short", day: "numeric",
-                    })}
-                  </span>
-                </div>
-              )}
-              <button
-                onClick={() => onChangeMembership(contact)}
-                className="w-full mt-1 text-xs text-purple-600 font-medium hover:text-purple-700 flex items-center justify-center gap-1 py-1 border border-purple-200 rounded-lg hover:bg-purple-50 transition-colors"
-              >
-                <Crown size={11} />
-                Change Membership
-              </button>
-            </div>
-          </Section>
 
           {/* Contact info */}
           <Section title="Contact Information">
@@ -107,11 +78,23 @@ export default function ViewCustomerPanel({ contact, onClose, onUpdate, onChange
           {/* Order stats */}
           <Section title="Order Statistics">
             <div className="grid grid-cols-2 gap-3">
-              <StatBox icon={<ShoppingBag size={14} className="text-purple-500" />} label="Total Orders" value={String(contact.orders_count)} />
-              <StatBox icon={<span className="text-green-500 text-sm font-bold">$</span>} label="Total Spent" value={`$${parseFloat(String(contact.total_spent)).toFixed(2)}`} />
+              <StatBox
+                icon={<ShoppingBag size={14} className="text-purple-500" />}
+                label="Total Orders"
+                value={String(contact.orders_count)}
+              />
+              <StatBox
+                icon={<span className="text-green-500 text-sm font-bold">$</span>}
+                label="Total Spent"
+                value={`$${parseFloat(String(contact.total_spent)).toFixed(2)}`}
+              />
             </div>
             {contact.last_order_at && (
-              <InfoRow icon={<Calendar size={13} className="text-gray-400" />} label="Last Order" value={new Date(contact.last_order_at).toLocaleDateString()} />
+              <InfoRow
+                icon={<Calendar size={13} className="text-gray-400" />}
+                label="Last Order"
+                value={new Date(contact.last_order_at).toLocaleDateString()}
+              />
             )}
           </Section>
 
@@ -120,7 +103,10 @@ export default function ViewCustomerPanel({ contact, onClose, onUpdate, onChange
             {contact.tags?.length > 0 ? (
               <div className="flex flex-wrap gap-1.5">
                 {contact.tags.map((tag) => (
-                  <span key={tag} className="flex items-center gap-1 px-2 py-1 bg-gray-100 text-gray-600 text-xs rounded-md">
+                  <span
+                    key={tag}
+                    className="flex items-center gap-1 px-2 py-1 bg-gray-100 text-gray-600 text-xs rounded-md"
+                  >
                     <Tag size={10} />
                     {tag}
                   </span>
@@ -133,18 +119,26 @@ export default function ViewCustomerPanel({ contact, onClose, onUpdate, onChange
 
           {/* Meta */}
           <Section title="Shopify Info">
-            <InfoRow icon={<span className="text-gray-400 text-xs font-mono">#</span>} label="Shopify ID" value={contact.shopify_customer_id} mono />
+            <InfoRow
+              icon={<span className="text-gray-400 text-xs font-mono">#</span>}
+              label="Shopify ID"
+              value={contact.shopify_customer_id}
+              mono
+            />
             {contact.created_at && (
               <InfoRow
                 icon={<Calendar size={13} className="text-gray-400" />}
                 label="Customer Since"
-                value={new Date(contact.created_at).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}
+                value={new Date(contact.created_at).toLocaleDateString("en-US", {
+                  year: "numeric", month: "long", day: "numeric",
+                })}
               />
             )}
           </Section>
+
         </div>
 
-        {/* Footer */}
+        {/* Footer — Update button */}
         <div className="px-5 py-4 border-t border-gray-100">
           <button
             onClick={() => onUpdate(contact)}
@@ -168,13 +162,20 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function InfoRow({ icon, label, value, mono }: { icon: React.ReactNode; label: string; value: string; mono?: boolean }) {
+function InfoRow({ icon, label, value, mono }: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
   return (
     <div className="flex items-start gap-2.5 py-1.5 border-b border-gray-50 last:border-0">
       <span className="mt-0.5 flex-shrink-0">{icon}</span>
       <div className="flex-1 min-w-0">
         <p className="text-xs text-gray-400">{label}</p>
-        <p className={`text-sm text-gray-800 truncate ${mono ? "font-mono" : "font-medium"}`}>{value}</p>
+        <p className={`text-sm text-gray-800 truncate ${mono ? "font-mono" : "font-medium"}`}>
+          {value}
+        </p>
       </div>
     </div>
   );

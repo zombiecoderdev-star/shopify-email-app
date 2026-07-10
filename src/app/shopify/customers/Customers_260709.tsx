@@ -5,16 +5,14 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import {
   Search, RefreshCw, Plus, Filter, Upload,
   ChevronUp, ChevronDown, ChevronsUpDown,
-  Eye, Pencil, Trash2, Crown,
+  Eye, Pencil, Trash2,
 } from "lucide-react";
 import AddCustomerModal from "@/components/AddCustomerModal";
 import ImportExportModal from "@/components/ImportExportModal";
 import ViewCustomerPanel from "@/components/ViewCustomerPanel";
 import UpdateCustomerModal from "@/components/UpdateCustomerModal";
 import DeleteConfirmModal from "@/components/DeleteConfirmModal";
-import ChangeMembershipModal from "@/components/ChangeMembershipModal";
 import Pagination, { usePagination } from "@/components/Pagination";
-import { getMembership } from "@/config/memberships";
 
 type Contact = {
   id: string;
@@ -27,13 +25,11 @@ type Contact = {
   subscribed: boolean;
   tags: string[];
   shopify_customer_id: string;
-  membership_id: number;
-  subscription_date: string | null;
   created_at?: string;
   last_order_at?: string | null;
 };
 
-type SortKey = "name" | "status" | "orders_count" | "total_spent" | "membership_id";
+type SortKey = "name" | "status" | "orders_count" | "total_spent";
 type SortDir = "asc" | "desc" | null;
 
 const SEGMENTS = [
@@ -46,9 +42,9 @@ const SEGMENTS = [
 
 const COLUMNS: { label: string; key: SortKey | null }[] = [
   { label: "Customer Name",  key: "name" },
-  { label: "Membership",     key: "membership_id" },
   { label: "Status",         key: "status" },
   { label: "Tags",           key: null },
+  { label: "Shopify ID",     key: null },
   { label: "Orders / Spent", key: "orders_count" },
 ];
 
@@ -70,13 +66,10 @@ export default function Customers() {
   const [deleteContact, setDeleteContact] = useState<Contact | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  // Multi-select
+  // Multi-select state
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [showBulkDelete, setShowBulkDelete] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
-  const [showMembershipModal, setShowMembershipModal] = useState(false);
-  // For single-contact membership change from view panel
-  const [membershipContact, setMembershipContact] = useState<Contact | null>(null);
 
   const shop = new URLSearchParams(window.location.search).get("shop") || "";
   const toast = (msg: string, opts?: { isError?: boolean }) => shopify.toast.show(msg, opts);
@@ -141,7 +134,9 @@ export default function Customers() {
 
   async function handleBulkDelete() {
     setBulkDeleting(true);
-    const ids = contacts.filter((c) => selected.has(c.id)).map((c) => c.shopify_customer_id);
+    const ids = contacts
+      .filter((c) => selected.has(c.id))
+      .map((c) => c.shopify_customer_id);
     try {
       const res = await fetch("/api/shopify/customers/bulk-delete", {
         method: "DELETE",
@@ -182,7 +177,6 @@ export default function Customers() {
       } else if (sortKey === "status") { av = a.subscribed ? 1 : 0; bv = b.subscribed ? 1 : 0; }
       else if (sortKey === "orders_count") { av = a.orders_count; bv = b.orders_count; }
       else if (sortKey === "total_spent") { av = a.total_spent; bv = b.total_spent; }
-      else if (sortKey === "membership_id") { av = a.membership_id ?? 0; bv = b.membership_id ?? 0; }
       if (av < bv) return sortDir === "asc" ? -1 : 1;
       if (av > bv) return sortDir === "asc" ? 1 : -1;
       return 0;
@@ -209,45 +203,36 @@ export default function Customers() {
   );
   const paginated = paginate(processed);
 
-  const allCurrentSelected = paginated.length > 0 && paginated.every((c) => selected.has(c.id));
+  // Select all on current page
+  const allCurrentSelected =
+    paginated.length > 0 && paginated.every((c) => selected.has(c.id));
   const someCurrentSelected = paginated.some((c) => selected.has(c.id));
 
   function toggleSelectAll() {
     if (allCurrentSelected) {
-      setSelected((prev) => { const s = new Set(prev); paginated.forEach((c) => s.delete(c.id)); return s; });
+      // Deselect current page
+      setSelected((prev) => {
+        const s = new Set(prev);
+        paginated.forEach((c) => s.delete(c.id));
+        return s;
+      });
     } else {
-      setSelected((prev) => { const s = new Set(prev); paginated.forEach((c) => s.add(c.id)); return s; });
+      // Select current page
+      setSelected((prev) => {
+        const s = new Set(prev);
+        paginated.forEach((c) => s.add(c.id));
+        return s;
+      });
     }
   }
 
   function toggleOne(id: string) {
-    setSelected((prev) => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s; });
+    setSelected((prev) => {
+      const s = new Set(prev);
+      s.has(id) ? s.delete(id) : s.add(id);
+      return s;
+    });
   }
-
-  // When bulk membership change succeeds, update local state
-  function onBulkMembershipSuccess(newMembershipId: number) {
-    const ids = selected;
-    setContacts((prev) =>
-      prev.map((c) =>
-        ids.has(c.id)
-          ? { ...c, membership_id: newMembershipId, subscription_date: new Date().toISOString() }
-          : c
-      )
-    );
-  }
-
-  // When single contact membership changes
-  function onSingleMembershipSuccess(contactId: string, newMembershipId: number) {
-    setContacts((prev) =>
-      prev.map((c) =>
-        c.id === contactId
-          ? { ...c, membership_id: newMembershipId, subscription_date: new Date().toISOString() }
-          : c
-      )
-    );
-  }
-
-  const selectedContactIds = Array.from(selected);
 
   return (
     <div className="p-6">
@@ -261,19 +246,32 @@ export default function Customers() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => setShowImportExport(true)} className="flex items-center gap-1.5 px-3 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors">
-            <Upload size={14} /> Import / Export
+          <button
+            onClick={() => setShowImportExport(true)}
+            className="flex items-center gap-1.5 px-3 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            <Upload size={14} />
+            Import / Export
           </button>
-          <button onClick={() => setShowAddModal(true)} className="flex items-center gap-1.5 px-3 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors">
-            <Plus size={14} /> Add Customer
+          <button
+            onClick={() => setShowAddModal(true)}
+            className="flex items-center gap-1.5 px-3 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            <Plus size={14} />
+            Add Customer
           </button>
-          <button onClick={syncCustomers} disabled={syncing} className="flex items-center gap-1.5 px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors">
+          <button
+            onClick={syncCustomers}
+            disabled={syncing}
+            className="flex items-center gap-1.5 px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
+          >
             <RefreshCw size={14} className={syncing ? "animate-spin" : ""} />
             {syncing ? "Syncing..." : "Sync Customers"}
           </button>
         </div>
       </div>
 
+      {/* Main layout */}
       <div className="flex gap-4">
 
         {/* Left panel */}
@@ -282,7 +280,9 @@ export default function Customers() {
             <div className="px-4 py-3 border-b border-gray-100">
               <div className="flex items-center gap-1.5">
                 <Filter size={12} className="text-gray-400" />
-                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Audience Segments</p>
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  Audience Segments
+                </p>
               </div>
             </div>
             <div className="py-1">
@@ -290,21 +290,30 @@ export default function Customers() {
                 const count = contacts.filter(seg.filter).length;
                 const active = activeSegment === i;
                 return (
-                  <button key={i} onClick={() => { setActiveSegment(i); setSelected(new Set()); }}
-                    className={`w-full flex items-center justify-between px-4 py-2.5 text-sm transition-colors ${active ? "bg-blue-50 text-blue-700 font-medium" : "text-gray-600 hover:bg-gray-50"}`}
+                  <button
+                    key={i}
+                    onClick={() => { setActiveSegment(i); setSelected(new Set()); }}
+                    className={`w-full flex items-center justify-between px-4 py-2.5 text-sm transition-colors ${
+                      active ? "bg-blue-50 text-blue-700 font-medium" : "text-gray-600 hover:bg-gray-50"
+                    }`}
                   >
                     <span>{seg.label}</span>
-                    <span className={`text-xs px-1.5 py-0.5 rounded-full ${active ? "bg-blue-100 text-blue-600" : "bg-gray-100 text-gray-400"}`}>{count}</span>
+                    <span className={`text-xs px-1.5 py-0.5 rounded-full ${
+                      active ? "bg-blue-100 text-blue-600" : "bg-gray-100 text-gray-400"
+                    }`}>{count}</span>
                   </button>
                 );
               })}
             </div>
           </div>
+
           <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4">
             <p className="text-xs font-semibold text-yellow-800 mb-1.5">GDPR / CASL Consent Check</p>
             <p className="text-xs text-yellow-700 leading-relaxed">
               Only send marketing emails to customers flagged with{" "}
-              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-700 border border-green-300">SUBSCRIBED</span>
+              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-700 border border-green-300">
+                SUBSCRIBED
+              </span>
               . Sending emails to unsubscribed accounts is a CAN-SPAM violation.
             </p>
           </div>
@@ -317,7 +326,10 @@ export default function Customers() {
           <div className="p-3 border-b border-gray-100">
             <div className="relative">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input type="text" placeholder="Search customers by name, email, or Shopify tags..." value={search}
+              <input
+                type="text"
+                placeholder="Search customers by name, email, or Shopify tags..."
+                value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="w-full pl-9 pr-4 py-2 text-sm text-gray-700 placeholder-gray-400 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 focus:bg-white transition-colors"
               />
@@ -331,15 +343,11 @@ export default function Customers() {
                 {selected.size} customer{selected.size > 1 ? "s" : ""} selected
               </p>
               <div className="flex items-center gap-2">
-                <button onClick={() => setSelected(new Set())} className="text-xs text-blue-500 hover:text-blue-700">
-                  Deselect all
-                </button>
                 <button
-                  onClick={() => { setMembershipContact(null); setShowMembershipModal(true); }}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-500 text-white text-xs font-medium rounded-lg hover:bg-purple-600 transition-colors"
+                  onClick={() => setSelected(new Set())}
+                  className="text-xs text-blue-500 hover:text-blue-700"
                 >
-                  <Crown size={12} />
-                  Change Membership
+                  Deselect all
                 </button>
                 <button
                   onClick={() => setShowBulkDelete(true)}
@@ -357,14 +365,21 @@ export default function Customers() {
             {loading ? (
               <div className="p-16 text-center text-gray-400 text-sm">Loading contacts...</div>
             ) : paginated.length === 0 ? (
-              <div className="p-16 text-center text-gray-400 text-sm">No customers found.</div>
+              <div className="p-16 text-center text-gray-400 text-sm">
+                No customers found matching the search or segment criteria.
+              </div>
             ) : (
               <table className="w-full text-sm">
                 <thead className="border-b border-gray-100">
                   <tr>
+                    {/* Select all checkbox */}
                     <th className="pl-4 py-3 w-8">
-                      <input type="checkbox" checked={allCurrentSelected}
-                        ref={(el) => { if (el) el.indeterminate = someCurrentSelected && !allCurrentSelected; }}
+                      <input
+                        type="checkbox"
+                        checked={allCurrentSelected}
+                        ref={(el) => {
+                          if (el) el.indeterminate = someCurrentSelected && !allCurrentSelected;
+                        }}
                         onChange={toggleSelectAll}
                         className="accent-green-600 w-3.5 h-3.5 cursor-pointer"
                       />
@@ -372,7 +387,8 @@ export default function Customers() {
                     {COLUMNS.map(({ label, key }) => (
                       <th key={label} className="text-left px-4 py-3">
                         {key ? (
-                          <button onClick={() => handleSort(key)}
+                          <button
+                            onClick={() => handleSort(key)}
                             className="flex items-center gap-1 group text-xs font-semibold text-gray-400 uppercase tracking-wide hover:text-gray-700 transition-colors"
                           >
                             {label}
@@ -383,127 +399,160 @@ export default function Customers() {
                         )}
                       </th>
                     ))}
-                    <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wide text-right">Actions</th>
+                    {/* Actions column */}
+                    <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wide text-right">
+                      Actions
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
-                  {paginated.map((c) => {
-                    const membership = getMembership(c.membership_id ?? 0);
-                    return (
-                      <tr key={c.id} className={`hover:bg-gray-50 transition-colors ${selected.has(c.id) ? "bg-blue-50/50" : ""}`}>
-                        <td className="pl-4 py-3 w-8">
-                          <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleOne(c.id)}
-                            className="accent-green-600 w-3.5 h-3.5 cursor-pointer"
-                          />
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2.5">
-                            <div className="w-7 h-7 rounded-full bg-green-100 flex items-center justify-center text-xs font-bold text-green-700 flex-shrink-0">
-                              {(c.first_name?.[0] || c.email?.[0] || "?").toUpperCase()}
-                            </div>
-                            <div>
-                              <p className="font-medium text-gray-900">
-                                {[c.first_name, c.last_name].filter(Boolean).join(" ") || "—"}
-                              </p>
-                              <p className="text-xs text-gray-400">{c.email}</p>
-                            </div>
+                  {paginated.map((c) => (
+                    <tr
+                      key={c.id}
+                      className={`hover:bg-gray-50 transition-colors ${
+                        selected.has(c.id) ? "bg-blue-50/50" : ""
+                      }`}
+                    >
+                      {/* Row checkbox */}
+                      <td className="pl-4 py-3 w-8">
+                        <input
+                          type="checkbox"
+                          checked={selected.has(c.id)}
+                          onChange={() => toggleOne(c.id)}
+                          className="accent-green-600 w-3.5 h-3.5 cursor-pointer"
+                        />
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-7 h-7 rounded-full bg-green-100 flex items-center justify-center text-xs font-bold text-green-700 flex-shrink-0">
+                            {(c.first_name?.[0] || c.email?.[0] || "?").toUpperCase()}
                           </div>
-                        </td>
-                        {/* Membership badge */}
-                        <td className="px-4 py-3">
-                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold ${membership.badgeClass}`}>
-                            <Crown size={10} />
-                            {membership.name}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className={`inline-flex px-2 py-0.5 rounded text-xs font-semibold ${c.subscribed ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"}`}>
-                            {c.subscribed ? "SUBSCRIBED" : "UNSUBSCRIBED"}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex flex-wrap gap-1">
-                            {c.tags?.length > 0
-                              ? c.tags.slice(0, 2).map((tag) => (
-                                  <span key={tag} className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-xs rounded">{tag}</span>
-                                ))
-                              : <span className="text-gray-300 text-xs">—</span>
-                            }
+                          <div>
+                            <p className="font-medium text-gray-900">
+                              {[c.first_name, c.last_name].filter(Boolean).join(" ") || "—"}
+                            </p>
+                            <p className="text-xs text-gray-400">{c.email}</p>
                           </div>
-                        </td>
-                        <td className="px-4 py-3 text-gray-500 text-xs">
-                          {c.orders_count} orders / ${parseFloat(String(c.total_spent)).toFixed(2)}
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center justify-end gap-1">
-                            <ActionBtn title="View details" onClick={() => setViewContact(c)} className="hover:bg-blue-50 hover:text-blue-600">
-                              <Eye size={14} />
-                            </ActionBtn>
-                            <ActionBtn title="Edit customer" onClick={() => setUpdateContact(c)} className="hover:bg-green-50 hover:text-green-600">
-                              <Pencil size={14} />
-                            </ActionBtn>
-                            <ActionBtn title="Change membership" onClick={() => { setMembershipContact(c); setShowMembershipModal(true); }} className="hover:bg-purple-50 hover:text-purple-600">
-                              <Crown size={14} />
-                            </ActionBtn>
-                            <ActionBtn title="Delete customer" onClick={() => setDeleteContact(c)} className="hover:bg-red-50 hover:text-red-500">
-                              <Trash2 size={14} />
-                            </ActionBtn>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex px-2 py-0.5 rounded text-xs font-semibold ${
+                          c.subscribed ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"
+                        }`}>
+                          {c.subscribed ? "SUBSCRIBED" : "UNSUBSCRIBED"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap gap-1">
+                          {c.tags?.length > 0
+                            ? c.tags.slice(0, 2).map((tag) => (
+                                <span key={tag} className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-xs rounded">
+                                  {tag}
+                                </span>
+                              ))
+                            : <span className="text-gray-300 text-xs">—</span>
+                          }
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-gray-400 text-xs font-mono">
+                        #{c.shopify_customer_id}
+                      </td>
+                      <td className="px-4 py-3 text-gray-500 text-xs">
+                        {c.orders_count} orders / ${parseFloat(String(c.total_spent)).toFixed(2)}
+                      </td>
+                      {/* Action buttons */}
+                      <td className="px-4 py-3">
+                        <div className="flex items-center justify-end gap-1">
+                          <ActionBtn
+                            title="View details"
+                            onClick={() => setViewContact(c)}
+                            className="hover:bg-blue-50 hover:text-blue-600"
+                          >
+                            <Eye size={14} />
+                          </ActionBtn>
+                          <ActionBtn
+                            title="Edit customer"
+                            onClick={() => setUpdateContact(c)}
+                            className="hover:bg-green-50 hover:text-green-600"
+                          >
+                            <Pencil size={14} />
+                          </ActionBtn>
+                          <ActionBtn
+                            title="Delete customer"
+                            onClick={() => setDeleteContact(c)}
+                            className="hover:bg-red-50 hover:text-red-500"
+                          >
+                            <Trash2 size={14} />
+                          </ActionBtn>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             )}
           </div>
 
-          <Pagination page={page} perPage={perPage} total={processed.length} onPageChange={setPage} onPerPageChange={setPerPage} />
+          {/* Pagination */}
+          <Pagination
+            page={page}
+            perPage={perPage}
+            total={processed.length}
+            onPageChange={setPage}
+            onPerPageChange={setPerPage}
+          />
         </div>
       </div>
 
       {/* ── Modals & Panels ── */}
-      {showAddModal && <AddCustomerModal shop={shop} onClose={() => setShowAddModal(false)} onSuccess={loadContacts} showToast={toast} />}
-      {showImportExport && <ImportExportModal shop={shop} contacts={contacts} onClose={() => setShowImportExport(false)} onImportDone={loadContacts} showToast={toast} />}
 
-      {viewContact && (
-        <ViewCustomerPanel
-          contact={viewContact}
-          onClose={() => setViewContact(null)}
-          onUpdate={(c) => { setViewContact(null); setUpdateContact(c); }}
-          onChangeMembership={(c) => { setMembershipContact(c); setShowMembershipModal(true); }}
-        />
-      )}
-
-      {updateContact && (
-        <UpdateCustomerModal shop={shop} contact={updateContact} onClose={() => setUpdateContact(null)}
-          onSuccess={(updated) => setContacts((prev) => prev.map((c) => c.id === updated.id ? { ...c, ...updated } : c))}
+      {showAddModal && (
+        <AddCustomerModal
+          shop={shop}
+          onClose={() => setShowAddModal(false)}
+          onSuccess={loadContacts}
           showToast={toast}
         />
       )}
 
-      {/* Change membership — single or bulk */}
-      {showMembershipModal && (
-        <ChangeMembershipModal
+      {showImportExport && (
+        <ImportExportModal
           shop={shop}
-          contactIds={membershipContact ? [membershipContact.id] : selectedContactIds}
-          customerLabel={membershipContact
-            ? [membershipContact.first_name, membershipContact.last_name].filter(Boolean).join(" ") || membershipContact.email
-            : `${selected.size} customers`
-          }
-          currentMembershipId={membershipContact?.membership_id ?? 0}
-          onClose={() => { setShowMembershipModal(false); setMembershipContact(null); }}
-          onSuccess={(newId) => {
-            if (membershipContact) {
-              onSingleMembershipSuccess(membershipContact.id, newId);
-            } else {
-              onBulkMembershipSuccess(newId);
-            }
+          contacts={contacts}
+          onClose={() => setShowImportExport(false)}
+          onImportDone={loadContacts}
+          showToast={toast}
+        />
+      )}
+
+      {/* View panel — slides in from right */}
+      {viewContact && (
+        <ViewCustomerPanel
+          contact={viewContact}
+          onClose={() => setViewContact(null)}
+          onUpdate={(c) => {
+            setViewContact(null);
+            setUpdateContact(c);
+          }}
+        />
+      )}
+
+      {/* Update modal */}
+      {updateContact && (
+        <UpdateCustomerModal
+          shop={shop}
+          contact={updateContact}
+          onClose={() => setUpdateContact(null)}
+          onSuccess={(updated) => {
+            setContacts((prev) =>
+              prev.map((c) => (c.id === updated.id ? { ...c, ...updated } : c))
+            );
           }}
           showToast={toast}
         />
       )}
 
+      {/* Single delete confirm */}
       {deleteContact && (
         <DeleteConfirmModal
           title="Delete Customer?"
@@ -515,6 +564,7 @@ export default function Customers() {
         />
       )}
 
+      {/* Bulk delete confirm */}
       {showBulkDelete && (
         <DeleteConfirmModal
           title={`Delete ${selected.size} Customers?`}
@@ -530,11 +580,17 @@ export default function Customers() {
 }
 
 function ActionBtn({ children, onClick, title, className }: {
-  children: React.ReactNode; onClick: () => void; title: string; className?: string;
+  children: React.ReactNode;
+  onClick: () => void;
+  title: string;
+  className?: string;
 }) {
   return (
-    <button onClick={onClick} title={title}
-      className={`w-7 h-7 flex items-center justify-center rounded-md text-gray-400 transition-colors ${className}`}>
+    <button
+      onClick={onClick}
+      title={title}
+      className={`w-7 h-7 flex items-center justify-center rounded-md text-gray-400 transition-colors ${className}`}
+    >
       {children}
     </button>
   );
@@ -542,5 +598,7 @@ function ActionBtn({ children, onClick, title, className }: {
 
 function SortIcon({ active, dir }: { active: boolean; dir: SortDir }) {
   if (!active || !dir) return <ChevronsUpDown size={13} className="text-gray-300 group-hover:text-gray-500" />;
-  return dir === "asc" ? <ChevronUp size={13} className="text-green-600" /> : <ChevronDown size={13} className="text-green-600" />;
+  return dir === "asc"
+    ? <ChevronUp size={13} className="text-green-600" />
+    : <ChevronDown size={13} className="text-green-600" />;
 }
