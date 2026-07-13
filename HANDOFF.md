@@ -111,7 +111,8 @@ shopify-email-app/
 ├── db/
 │   ├── schema.sql                          # Full Postgres schema
 │   ├── shops_last_synced_migration.sql     # Run separately — adds shops.last_synced_at
-│   └── remove_membership_migration.sql     # Run separately — drops membership columns/table
+│   ├── remove_membership_migration.sql     # Run separately — drops membership columns/table
+│   └── campaigns_migration.sql             # Run separately — adds campaigns.audience_filter/recipient_count/updated_at, campaign_recipients.created_at
 ├── src/
 │   ├── middleware.ts                  # CSP for /shopify/*, auth guard for /admin/*
 │   ├── lib/
@@ -120,7 +121,10 @@ shopify-email-app/
 │   │   ├── supabaseBrowser.ts        # anon client (browser, used for admin auth)
 │   │   ├── adminAuth.ts              # verifyAdminSession() — shared by all /api/admin/* routes
 │   │   ├── tiptapContent.ts          # docFromText/textFromDoc/htmlFromDoc — TipTap JSON <-> text/HTML
-│   │   └── aiProvider.ts             # generateWithAI() — Gemini/Anthropic switch via AI_PROVIDER
+│   │   ├── aiProvider.ts             # generateWithAI() — Gemini/Anthropic switch via AI_PROVIDER
+│   │   ├── audience.ts               # AudienceFilter type + AUDIENCE_SEGMENTS metadata (client-safe, no supabaseAdmin import)
+│   │   ├── audienceQueries.ts        # countAudience/countAllAudienceSegments/resolveAudienceContactIds (server only)
+│   │   └── campaignSend.ts           # sendCampaignStub() — shared by send/route.ts and process-scheduled/route.ts
 │   ├── config/
 │   │   └── starterTemplates.ts       # Static starter template gallery data (app-level, not DB)
 │   ├── components/
@@ -134,7 +138,9 @@ shopify-email-app/
 │   │   ├── ImportExportModal.tsx     # CSV import (3-step) + export with filter
 │   │   ├── TemplateEditor.tsx        # Block-based email editor (add/reorder/edit/preview) — text block uses TipTap
 │   │   ├── TemplateGallery.tsx       # "Start from template" gallery + "Generate with AI" (full) modal
-│   │   └── TestSendModal.tsx         # Test-send stub modal — logs, never claims to deliver
+│   │   ├── TestSendModal.tsx         # Test-send stub modal — logs, never claims to deliver
+│   │   ├── CampaignWizard.tsx        # 4-step campaign builder (Basics/Template/Audience/Review) — shared by new + edit
+│   │   └── CampaignStatusBadge.tsx   # draft/scheduled/sending/sent badge — shared by list + detail pages
 │   └── app/
 │       ├── layout.tsx                # Root — App Bridge script + meta tag
 │       ├── page.tsx                  # Root page (unused)
@@ -156,15 +162,24 @@ shopify-email-app/
 │       │   ├── customers/
 │       │   │   ├── page.tsx          # SSR-disabled wrapper
 │       │   │   └── Customers.tsx     # Full contacts page
-│       │   └── templates/
+│       │   ├── templates/
+│       │   │   ├── page.tsx          # SSR-disabled wrapper — list
+│       │   │   ├── Templates.tsx     # List page (table + Pagination)
+│       │   │   ├── new/
+│       │   │   │   ├── page.tsx          # SSR-disabled wrapper — create
+│       │   │   │   └── NewTemplate.tsx   # Create page — TemplateGallery step, then name/subject + TemplateEditor
+│       │   │   └── [id]/
+│       │   │       ├── page.tsx          # SSR-disabled wrapper — edit
+│       │   │       └── EditTemplate.tsx  # Edit page (+ Delete, Send Test)
+│       │   └── campaigns/
 │       │       ├── page.tsx          # SSR-disabled wrapper — list
-│       │       ├── Templates.tsx     # List page (table + Pagination)
+│       │       ├── Campaigns.tsx     # List page (table + Pagination) — Recipients/Scheduled-Sent only populate once sent
 │       │       ├── new/
 │       │       │   ├── page.tsx          # SSR-disabled wrapper — create
-│       │       │   └── NewTemplate.tsx   # Create page — TemplateGallery step, then name/subject + TemplateEditor
+│       │       │   └── NewCampaign.tsx   # Create page — header + CampaignWizard (create mode)
 │       │       └── [id]/
-│       │           ├── page.tsx          # SSR-disabled wrapper — edit
-│       │           └── EditTemplate.tsx  # Edit page (+ Delete, Send Test)
+│       │           ├── page.tsx          # SSR-disabled wrapper — detail
+│       │           └── CampaignDetail.tsx # draft/scheduled -> CampaignWizard (edit mode) + Delete; sent -> read-only summary + recipients + analytics stub
 │       └── api/
 │           ├── auth/
 │           │   ├── route.ts          # GET /api/auth?shop= — starts OAuth
@@ -192,11 +207,18 @@ shopify-email-app/
 │               │   ├── delete/route.ts
 │               │   ├── bulk-delete/route.ts
 │               │   └── import/route.ts
-│               └── templates/
-│                   ├── route.ts          # GET ?shop= — list, POST — create
-│                   ├── [id]/route.ts     # PUT — update, DELETE
-│                   ├── ai-generate/route.ts # POST — mode "full"|"block" via aiProvider.ts, strict JSON parsing; GET — dev-banner provider hint
-│                   └── test-send/route.ts # POST — stub, logs to webhook_logs
+│               ├── templates/
+│               │   ├── route.ts          # GET ?shop= — list, POST — create
+│               │   ├── [id]/route.ts     # PUT — update, DELETE
+│               │   ├── ai-generate/route.ts # POST — mode "full"|"block" via aiProvider.ts, strict JSON parsing; GET — dev-banner provider hint
+│               │   └── test-send/route.ts # POST — stub, logs to webhook_logs
+│               └── campaigns/
+│                   ├── route.ts                  # GET ?shop= — list (template name embedded), POST — create
+│                   ├── [id]/route.ts              # PUT — update, DELETE (draft/scheduled only)
+│                   ├── [id]/recipients/route.ts   # GET ?shop= — recipient list for the sent-campaign view
+│                   ├── audience-count/route.ts    # GET ?shop= — exact counts for all 4 segments, one round trip
+│                   ├── send/route.ts               # POST { campaign_id } — stub send (sendCampaignStub)
+│                   └── process-scheduled/route.ts  # GET/POST — cron-target stub, not wired to a scheduler yet
 ```
 
 ---
@@ -231,6 +253,13 @@ list — it just leaves "Last Synced" empty.
 `membership_id` + `subscription_date` from `contacts` and drops the
 `membership_logs` table. Reverses the now-removed per-contact membership
 feature (see feature #10 note below for where billing tracking lives instead).
+
+**Run `db/campaigns_migration.sql` separately** — adds `audience_filter`
+(jsonb), `recipient_count` (int, default 0), and `updated_at` to `campaigns`;
+adds `created_at` to `campaign_recipients`. `campaigns.segment_id` (FK to the
+`segments` table) already existed but is untouched/unused by this feature —
+audience selection reuses the four fixed segments from `/shopify/customers`
+instead of the dynamic segments table; see Campaigns section below.
 
 ---
 
@@ -551,8 +580,8 @@ ngrok http 3000 --request-header-add "ngrok-skip-browser-warning: true"
 | 3 | Contact sync, webhooks, CRUD, import/export, pagination | ✅ DONE |
 | 4 | Admin panel (login, dashboard, sidebar, shop list, /admin/shops management) | ✅ DONE |
 | 5 | Email templates (builder + save/reuse) | ✅ DONE |
-| 6 | Campaigns (create, send, analytics) | ⬜ Next |
-| 7 | Scheduling | ⬜ |
+| 6 | Campaigns (create, send, analytics) | ✅ DONE |
+| 7 | Scheduling | 🟡 Processing logic done, cron trigger not wired up — see Campaigns section |
 | 8 | Automation flows (journey builder + tick engine) | ⬜ |
 | 9 | ESP integration (SendGrid / Resend / Postmark) | ⬜ |
 | 10 | Billing + email credits (Shopify Billing API). Shop-level free/paid tracking lives in `/admin` using the existing `billing_plans` + `shop_subscriptions` tables — not a per-contact concept. (Per-contact membership tiers were built and then removed; see git history.) | ⬜ |
@@ -568,14 +597,106 @@ clear message if cap is hit.
 
 ---
 
-## Next feature to build: Campaigns (#6)
+## Campaigns (DONE ✅)
 
-Not yet scoped in detail. `campaigns` + `campaign_recipients` tables already
-exist per the schema above (status: draft→scheduled→sending→sent, per-recipient
-open/click/bounce tracking). Will need a `template_id` + `segment_id` picker,
-send scheduling, and eventually the ESP integration (#9) to actually deliver —
-`campaign_recipients.esp_message_id` is already there to match inbound ESP
-webhooks back to a send.
+One-off broadcast campaigns: pick a template, pick an audience, save as
+draft, schedule for later, or send now. Sending is **stubbed** — same
+pattern as the template test-send stub (log the attempt, mark status, no
+real email delivery) — pending the ESP integration (#9).
+
+### Status lifecycle
+```
+draft ──────┐
+            ├─► sending ─► sent   (immediate "Send Now")
+scheduled ──┘
+   ▲
+   └─ process-scheduled route flips scheduled → sending → sent once scheduled_at <= now()
+```
+- **draft** — not scheduled, not sent. Editable, deletable.
+- **scheduled** — `scheduled_at` set. Editable, deletable. Picked up by
+  `process-scheduled` once due.
+- **sending** — transient: set the instant "Send Now" is clicked or a
+  scheduled campaign becomes due, immediately followed by the stub-send
+  call in the same request. Not editable/deletable (in practice you'll
+  rarely observe this status at rest, since the stub send is synchronous).
+- **sent** — terminal. `sent_at` + `recipient_count` set, `campaign_recipients`
+  rows written. View-only from here — no more edits, no delete.
+
+### `audience_filter` JSONB shape
+```json
+{ "segment": "all" | "subscribed" | "frequent" | "unsubscribed" }
+```
+Reuses the exact four segments from `/shopify/customers` (`Customers.tsx`
+`SEGMENTS`) rather than the dynamic `segments` table, so audience selection
+matches how merchants already think about their contact list — defined once
+in `src/lib/audience.ts` (`AUDIENCE_SEGMENTS`, client-safe) and resolved to
+actual contacts server-side in `src/lib/audienceQueries.ts` (`subscribed`
+→ `subscribed = true`, `frequent` → `orders_count >= 3`, `unsubscribed` →
+`subscribed = false`, `all` → no filter). `"all"` and `"unsubscribed"` both
+include contacts who opted out, so both are flagged `warnUnsubscribed` for
+the stronger inline compliance warning in the Audience step. `campaigns.segment_id`
+(FK to the `segments` table) is left in the schema untouched — this feature
+never reads or writes it.
+
+### Pages — `/shopify/campaigns`
+- **List** (`Campaigns.tsx`): sortable table (Name↕, Status↕, Scheduled/Sent
+  date↕), "New Campaign" button, `Pagination`. Template name and recipient
+  count come along for free via `campaigns?shop=`'s embedded `templates(name)`
+  select. Recipients/date columns only populate once a campaign is sent or
+  scheduled — draft rows show "—".
+- **New** (`new/NewCampaign.tsx`): header + `CampaignWizard` in create mode,
+  redirects to the list on any successful save/schedule/send.
+- **Detail** (`[id]/CampaignDetail.tsx`): fetches the full list via the
+  existing `GET ?shop=` route and finds the matching id client-side, same
+  convention as `EditTemplate.tsx`. Draft/scheduled → `CampaignWizard` in
+  edit mode (pre-filled, PUT instead of POST) + a Delete button, reloads in
+  place after saving instead of navigating away. Sent → read-only summary
+  (template, audience, recipient count, sent date), an analytics block
+  (Opens/Clicks/Bounces shown as "—" with "requires ESP integration (#9)" —
+  never fabricated), and the recipient list (`[id]/recipients` route).
+
+### `CampaignWizard` (`src/components/CampaignWizard.tsx`)
+Shared 4-step builder used by both the new and detail pages (`campaignId`
+prop present = edit/PUT, absent = create/POST):
+1. **Basics** — name + subject. Subject auto-prefills from the chosen
+   template once (step 2) without clobbering anything already typed.
+2. **Template** — card grid from `GET /api/shopify/templates?shop=`; "Create
+   new template" opens `/shopify/templates/new` in a new tab (`target="_blank"`)
+   so wizard progress isn't lost.
+3. **Audience** — radio list of the four segments with a live count per
+   segment (`GET /api/shopify/campaigns/audience-count`), the same GDPR/CASL
+   banner as `Customers.tsx`, plus a stronger red warning when the selected
+   segment includes unsubscribed contacts.
+4. **Review & Send** — summary card, then three actions: Save as Draft, Schedule
+   for later (inline datetime-local popover, `min` clamped to now), or Send
+   Now (creates/updates the campaign then immediately calls the send route).
+   All three toast a result and call `onSaved()` — the parent decides whether
+   that means "navigate to the list" (new) or "reload in place" (edit).
+
+### Stub send (`src/lib/campaignSend.ts` — `sendCampaignStub`)
+Shared by `POST .../send` (manual "Send Now") and `process-scheduled`:
+resolves `audience_filter` to contact ids (`resolveAudienceContactIds`),
+bulk-inserts one `campaign_recipients` row per contact with `status: "sent"`,
+updates the campaign (`status: "sent"`, `sent_at`, `recipient_count`), and
+logs to `webhook_logs` (`source: "esp"`, `topic: "campaign_send_stub"` — same
+`source` convention as the template test-send stub). Throws (caller returns
+400) if the campaign doesn't exist or is already sent, so a scheduled
+campaign can't be double-processed. Returns
+`"Campaign marked sent — ESP integration required for actual delivery"`,
+shown via toast — never implies real delivery happened.
+
+### Scheduling (#7 — processing logic done, trigger not wired up)
+`GET`/`POST /api/shopify/campaigns/process-scheduled` finds every campaign
+with `status = "scheduled"` and `scheduled_at <= now()` and runs the same
+stub-send flow for each. Mirrors the `flow_runs.next_action_at` pattern
+already planned for automation flows (#8), so the architecture stays
+consistent once a real background worker exists. **This route is not
+wired up to actually run on a schedule** — it needs an external trigger
+(a cron job, Vercel Cron, a scheduled Supabase function, etc.) to call it
+periodically. No auth check on it yet either, since a cron trigger may not
+be able to send one; add a shared-secret header before exposing it publicly.
+For now it's manually triggerable (hit the URL) so the processing logic
+itself can be verified independent of a real scheduler.
 
 ---
 
