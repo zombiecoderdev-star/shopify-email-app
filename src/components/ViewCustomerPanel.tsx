@@ -1,7 +1,6 @@
 "use client";
 
-import { X, Mail, Phone, ShoppingBag, Calendar, Tag, Edit2, Crown } from "lucide-react";
-import { getMembership } from "@/config/memberships";
+import { X, Mail, Phone, ShoppingBag, Calendar, Tag, Edit2 } from "lucide-react";
 
 type Contact = {
   id: string;
@@ -14,8 +13,6 @@ type Contact = {
   subscribed: boolean;
   tags: string[];
   shopify_customer_id: string;
-  membership_id: number;
-  subscription_date: string | null;
   created_at?: string;
   last_order_at?: string | null;
 };
@@ -24,13 +21,11 @@ type Props = {
   contact: Contact;
   onClose: () => void;
   onUpdate: (contact: Contact) => void;
-  onChangeMembership: (contact: Contact) => void;
 };
 
-export default function ViewCustomerPanel({ contact, onClose, onUpdate, onChangeMembership }: Props) {
+export default function ViewCustomerPanel({ contact, onClose, onUpdate }: Props) {
   const fullName = [contact.first_name, contact.last_name].filter(Boolean).join(" ") || "No name";
   const initials = (contact.first_name?.[0] || contact.email[0]).toUpperCase();
-  const membership = getMembership(contact.membership_id ?? 0);
 
   return (
     <>
@@ -60,43 +55,9 @@ export default function ViewCustomerPanel({ contact, onClose, onUpdate, onChange
                 }`}>
                   {contact.subscribed ? "SUBSCRIBED" : "UNSUBSCRIBED"}
                 </span>
-                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold ${membership.badgeClass}`}>
-                  <Crown size={10} />
-                  {membership.name}
-                </span>
               </div>
             </div>
           </div>
-
-          {/* Membership section */}
-          <Section title="Membership">
-            <div className="bg-gray-50 rounded-lg p-3 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-gray-500">Current tier</span>
-                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold ${membership.badgeClass}`}>
-                  <Crown size={10} />
-                  {membership.name}
-                </span>
-              </div>
-              {contact.subscription_date && (
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-gray-500">Since</span>
-                  <span className="text-xs font-medium text-gray-700">
-                    {new Date(contact.subscription_date).toLocaleDateString("en-US", {
-                      year: "numeric", month: "short", day: "numeric",
-                    })}
-                  </span>
-                </div>
-              )}
-              <button
-                onClick={() => onChangeMembership(contact)}
-                className="w-full mt-1 text-xs text-purple-600 font-medium hover:text-purple-700 flex items-center justify-center gap-1 py-1 border border-purple-200 rounded-lg hover:bg-purple-50 transition-colors"
-              >
-                <Crown size={11} />
-                Change Membership
-              </button>
-            </div>
-          </Section>
 
           {/* Contact info */}
           <Section title="Contact Information">

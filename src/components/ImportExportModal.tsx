@@ -33,6 +33,9 @@ type ImportResult = {
 
 type Props = {
   shop: string;
+  // When set, Import/Export target the admin-scoped API (any shop, chosen
+  // via a selector) instead of the embedded Shopify app's own shop/session.
+  shopId?: string;
   contacts: Contact[];        // existing contacts for export
   onClose: () => void;
   onImportDone: () => void;   // refresh list after import
@@ -43,7 +46,7 @@ type Tab = "import" | "export";
 type ImportStep = "upload" | "preview" | "result";
 
 export default function ImportExportModal({
-  shop, contacts, onClose, onImportDone, showToast,
+  shop, shopId, contacts, onClose, onImportDone, showToast,
 }: Props) {
   const [tab, setTab] = useState<Tab>("import");
 
@@ -85,8 +88,8 @@ export default function ImportExportModal({
         {/* Body */}
         <div className="flex-1 overflow-auto">
           {tab === "import"
-            ? <ImportTab shop={shop} onImportDone={onImportDone} showToast={showToast} onClose={onClose} />
-            : <ExportTab contacts={contacts} showToast={showToast} onClose={onClose} />
+            ? <ImportTab shop={shop} shopId={shopId} onImportDone={onImportDone} showToast={showToast} onClose={onClose} />
+            : <ExportTab shopId={shopId} contacts={contacts} showToast={showToast} onClose={onClose} />
           }
         </div>
 
@@ -97,8 +100,9 @@ export default function ImportExportModal({
 
 // ─── IMPORT TAB ────────────────────────────────────────────────────────────────
 
-function ImportTab({ shop, onImportDone, showToast, onClose }: {
+function ImportTab({ shop, shopId, onImportDone, showToast, onClose }: {
   shop: string;
+  shopId?: string;
   onImportDone: () => void;
   showToast: Props["showToast"];
   onClose: () => void;
@@ -163,10 +167,12 @@ function ImportTab({ shop, onImportDone, showToast, onClose }: {
   async function runImport() {
     setImporting(true);
     try {
-      const res = await fetch("/api/shopify/customers/import", {
+      const endpoint = shopId ? "/api/admin/contacts/import" : "/api/shopify/customers/import";
+      const body = shopId ? { shop_id: shopId, customers: rows } : { shop, customers: rows };
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ shop, customers: rows }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       setResults(data.results || []);
@@ -399,7 +405,8 @@ function ImportTab({ shop, onImportDone, showToast, onClose }: {
 
 // ─── EXPORT TAB ────────────────────────────────────────────────────────────────
 
-function ExportTab({ contacts, showToast, onClose }: {
+function ExportTab({ shopId, contacts, showToast, onClose }: {
+  shopId?: string;
   contacts: Contact[];
   showToast: Props["showToast"];
   onClose: () => void;
@@ -415,6 +422,17 @@ function ExportTab({ contacts, showToast, onClose }: {
   function exportCSV() {
     if (filtered.length === 0) {
       showToast("No contacts to export", { isError: true });
+      return;
+    }
+
+    // Admin mode: download via the server route, which has no row cap
+    // (the client-held `contacts` list is capped at 100 by the list API).
+    if (shopId) {
+      const a = document.createElement("a");
+      a.href = `/api/admin/contacts/export?shop_id=${shopId}&filter=${filter}`;
+      a.click();
+      showToast(`Exporting contacts ✅`);
+      onClose();
       return;
     }
 

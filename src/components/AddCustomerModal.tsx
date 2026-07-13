@@ -5,6 +5,9 @@ import { X, Loader2 } from "lucide-react";
 
 type Props = {
   shop: string;
+  // When set, this modal targets the admin-scoped API (any shop, chosen via
+  // a selector) instead of the embedded Shopify app's own shop/session.
+  shopId?: string;
   onClose: () => void;
   onSuccess: () => void;
   showToast: (msg: string, opts?: { isError?: boolean }) => void;
@@ -28,6 +31,7 @@ const INITIAL: FormData = {
 
 export default function AddCustomerModal({
   shop,
+  shopId,
   onClose,
   onSuccess,
   showToast,
@@ -54,10 +58,12 @@ export default function AddCustomerModal({
     setLoading(true);
 
     try {
-      const res = await fetch("/api/shopify/customers/create", {
+      const endpoint = shopId ? "/api/admin/contacts/create" : "/api/shopify/customers/create";
+      const body = shopId ? { shop_id: shopId, ...form } : { shop, ...form };
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ shop, ...form }),
+        body: JSON.stringify(body),
       });
 
       const data = await res.json();

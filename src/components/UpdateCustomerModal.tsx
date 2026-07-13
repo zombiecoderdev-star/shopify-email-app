@@ -15,6 +15,9 @@ type Contact = {
 
 type Props = {
   shop: string;
+  // When set, this modal targets the admin-scoped API instead of the
+  // embedded Shopify app's own shop/session.
+  shopId?: string;
   contact: Contact;
   onClose: () => void;
   onSuccess: (updated: Contact) => void;
@@ -22,7 +25,7 @@ type Props = {
 };
 
 export default function UpdateCustomerModal({
-  shop, contact, onClose, onSuccess, showToast,
+  shop, shopId, contact, onClose, onSuccess, showToast,
 }: Props) {
   const [form, setForm] = useState({
     first_name: contact.first_name || "",
@@ -39,14 +42,14 @@ export default function UpdateCustomerModal({
   async function handleSubmit() {
     setLoading(true);
     try {
-      const res = await fetch("/api/shopify/customers/update", {
+      const endpoint = shopId ? "/api/admin/contacts/update" : "/api/shopify/customers/update";
+      const body = shopId
+        ? { shop_id: shopId, shopify_customer_id: contact.shopify_customer_id, ...form }
+        : { shop, shopify_customer_id: contact.shopify_customer_id, ...form };
+      const res = await fetch(endpoint, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          shop,
-          shopify_customer_id: contact.shopify_customer_id,
-          ...form,
-        }),
+        body: JSON.stringify(body),
       });
 
       const data = await res.json();

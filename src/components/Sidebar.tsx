@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import {
   LayoutDashboard,
   ShoppingBag,
@@ -33,6 +33,8 @@ const navItems = [
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const shop = searchParams.get("shop") || "";
   const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
@@ -85,10 +87,11 @@ export default function Sidebar() {
       <nav className="flex-1 py-3 px-2">
         {navItems.map(({ label, href, icon: Icon }) => {
           const active = pathname === href;
+          const linkHref = shop ? `${href}?shop=${shop}` : href;
           return (
             <Link
               key={href}
-              href={href}
+              href={linkHref}
               title={collapsed ? label : undefined}
               className={`flex items-center gap-2.5 px-3 py-2 rounded-md mb-0.5 text-sm transition-colors ${
                 collapsed ? "justify-center" : ""
