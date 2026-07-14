@@ -5,13 +5,14 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import {
   Search, RefreshCw, Plus, Filter, Upload,
   ChevronUp, ChevronDown, ChevronsUpDown,
-  Eye, Pencil, Trash2,
+  Eye, Pencil, Trash2, Tag,
 } from "lucide-react";
 import AddCustomerModal from "@/components/AddCustomerModal";
 import ImportExportModal from "@/components/ImportExportModal";
 import ViewCustomerPanel from "@/components/ViewCustomerPanel";
 import UpdateCustomerModal from "@/components/UpdateCustomerModal";
 import DeleteConfirmModal from "@/components/DeleteConfirmModal";
+import ManageTagsModal from "@/components/ManageTagsModal";
 import Pagination, { usePagination } from "@/components/Pagination";
 
 type Contact = {
@@ -63,6 +64,8 @@ export default function Customers() {
   const [updateContact, setUpdateContact] = useState<Contact | null>(null);
   const [deleteContact, setDeleteContact] = useState<Contact | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // Single contact -> [contact]; bulk -> every selected contact.
+  const [tagsTarget, setTagsTarget] = useState<Contact[] | null>(null);
 
   // Multi-select
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -300,6 +303,13 @@ export default function Customers() {
                   Deselect all
                 </button>
                 <button
+                  onClick={() => setTagsTarget(contacts.filter((c) => selected.has(c.id)))}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-500 text-white text-xs font-medium rounded-lg hover:bg-blue-600 transition-colors"
+                >
+                  <Tag size={12} />
+                  Manage Tags
+                </button>
+                <button
                   onClick={() => setShowBulkDelete(true)}
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500 text-white text-xs font-medium rounded-lg hover:bg-red-600 transition-colors"
                 >
@@ -373,12 +383,20 @@ export default function Customers() {
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex flex-wrap gap-1">
-                            {c.tags?.length > 0
-                              ? c.tags.slice(0, 2).map((tag) => (
+                            {c.tags?.length > 0 ? (
+                              <>
+                                {c.tags.slice(0, 3).map((tag) => (
                                   <span key={tag} className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-xs rounded">{tag}</span>
-                                ))
-                              : <span className="text-gray-300 text-xs">—</span>
-                            }
+                                ))}
+                                {c.tags.length > 3 && (
+                                  <span title={c.tags.slice(3).join(", ")} className="px-1.5 py-0.5 bg-gray-100 text-gray-400 text-xs rounded">
+                                    +{c.tags.length - 3}
+                                  </span>
+                                )}
+                              </>
+                            ) : (
+                              <span className="text-gray-300 text-xs">—</span>
+                            )}
                           </div>
                         </td>
                         <td className="px-4 py-3 text-gray-500 text-xs">
@@ -391,6 +409,9 @@ export default function Customers() {
                             </ActionBtn>
                             <ActionBtn title="Edit customer" onClick={() => setUpdateContact(c)} className="hover:bg-green-50 hover:text-green-600">
                               <Pencil size={14} />
+                            </ActionBtn>
+                            <ActionBtn title="Manage tags" onClick={() => setTagsTarget([c])} className="hover:bg-blue-50 hover:text-blue-600">
+                              <Tag size={14} />
                             </ActionBtn>
                             <ActionBtn title="Delete customer" onClick={() => setDeleteContact(c)} className="hover:bg-red-50 hover:text-red-500">
                               <Trash2 size={14} />
@@ -412,6 +433,33 @@ export default function Customers() {
       {/* ── Modals & Panels ── */}
       {showAddModal && <AddCustomerModal shop={shop} onClose={() => setShowAddModal(false)} onSuccess={loadContacts} showToast={toast} />}
       {showImportExport && <ImportExportModal shop={shop} contacts={contacts} onClose={() => setShowImportExport(false)} onImportDone={loadContacts} showToast={toast} />}
+
+      {tagsTarget && tagsTarget.length > 0 && (
+        <ManageTagsModal
+          shop={shop}
+          contactIds={tagsTarget.map((c) => c.id)}
+          customerLabel={
+            tagsTarget.length === 1
+              ? [tagsTarget[0].first_name, tagsTarget[0].last_name].filter(Boolean).join(" ") || tagsTarget[0].email
+              : `${tagsTarget.length} customers`
+          }
+          currentTags={tagsTarget.length === 1 ? tagsTarget[0].tags : []}
+          onClose={() => setTagsTarget(null)}
+          onSuccess={(added, removed) => {
+            const ids = new Set(tagsTarget.map((c) => c.id));
+            setContacts((prev) =>
+              prev.map((c) => {
+                if (!ids.has(c.id)) return c;
+                const kept = (c.tags || [])
+                  .map((t) => t.trim().toLowerCase())
+                  .filter((t) => t && !removed.includes(t));
+                return { ...c, tags: [...new Set([...kept, ...added])] };
+              })
+            );
+          }}
+          showToast={toast}
+        />
+      )}
 
       {viewContact && (
         <ViewCustomerPanel

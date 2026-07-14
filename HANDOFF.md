@@ -99,9 +99,25 @@ SUPABASE_SERVICE_ROLE_KEY=
 AI_PROVIDER=gemini                # "gemini" | "anthropic" — switch which AI SDK ai-generate/route.ts calls
 GEMINI_API_KEY=                   # From Google AI Studio (aistudio.google.com) — free tier, for dev/testing
 ANTHROPIC_API_KEY=                # For AI template generation — server-side only, never NEXT_PUBLIC_
+ESP_PROVIDER=aws_ses              # Swappable: "aws_ses" today, "resend"/"sendgrid"/"postmark" could be added later
+AWS_SES_REGION=                   # e.g. us-east-1 — must match the region your SES identity is verified in
+AWS_SES_ACCESS_KEY_ID=            # IAM user/role with ses:SendEmail + ses:GetSendQuota
+AWS_SES_SECRET_ACCESS_KEY=
+AWS_SES_FROM_EMAIL=               # Must be a verified identity (email or domain) in that SES region
+AWS_SES_CONFIGURATION_SET=        # Optional — name of the config set from the ESP section's step 4; sends work without it, but bounce/complaint/delivery events won't reach /api/webhooks/ses unless it's set
 ```
 **Reminder: before going live, set `AI_PROVIDER=anthropic` in the production env.**
 Gemini is for free-tier dev/testing only — don't ship on it.
+
+**AWS SES sandbox mode — read this before testing sends.** Every new AWS SES
+account starts in sandbox mode: it can only send to email addresses/domains
+you've manually verified in the SES console (or the built-in Mailbox
+Simulator addresses). Real campaign sends to any other recipient will fail
+outright until AWS grants production access — a manual request through the
+SES console (**Account dashboard → Request production access**), typically
+approved within 24 hours. Verify your own test inbox as an identity first so
+test-send / the Sending & ESP page's connection check has something to
+succeed against. See the ESP section below for full setup steps.
 
 ---
 
@@ -112,7 +128,9 @@ shopify-email-app/
 │   ├── schema.sql                          # Full Postgres schema
 │   ├── shops_last_synced_migration.sql     # Run separately — adds shops.last_synced_at
 │   ├── remove_membership_migration.sql     # Run separately — drops membership columns/table
-│   └── campaigns_migration.sql             # Run separately — adds campaigns.audience_filter/recipient_count/updated_at, campaign_recipients.created_at
+│   ├── campaigns_migration.sql             # Run separately — adds campaigns.audience_filter/recipient_count/updated_at, campaign_recipients.created_at
+│   ├── esp_migration.sql                   # Run separately — adds campaign_recipients.complained_at
+│   └── tags_migration.sql                  # Run separately — contacts.tags NOT NULL text[] + normalize existing values + GIN index
 ├── src/
 │   ├── middleware.ts                  # CSP for /shopify/*, auth guard for /admin/*
 │   ├── lib/
@@ -122,9 +140,13 @@ shopify-email-app/
 │   │   ├── adminAuth.ts              # verifyAdminSession() — shared by all /api/admin/* routes
 │   │   ├── tiptapContent.ts          # docFromText/textFromDoc/htmlFromDoc — TipTap JSON <-> text/HTML
 │   │   ├── aiProvider.ts             # generateWithAI() — Gemini/Anthropic switch via AI_PROVIDER
-│   │   ├── audience.ts               # AudienceFilter type + AUDIENCE_SEGMENTS metadata (client-safe, no supabaseAdmin import)
-│   │   ├── audienceQueries.ts        # countAudience/countAllAudienceSegments/resolveAudienceContactIds (server only)
-│   │   └── campaignSend.ts           # sendCampaignStub() — shared by send/route.ts and process-scheduled/route.ts
+│   │   ├── audience.ts               # AudienceFilter union (segment/tag/contacts) + normalizeAudienceFilter + AUDIENCE_SEGMENTS (client-safe)
+│   │   ├── resolveAudience.ts        # countAudience/countAllAudienceSegments/resolveAudienceContacts — ALL audience types resolve here (server only; replaced audienceQueries.ts)
+│   │   ├── tags.ts                   # normalizeTag(s)/tagsFromShopifyString/mergeTags — client-safe tag normalization
+│   │   ├── campaignSend.ts           # sendCampaign() — real per-contact send, shared by send/route.ts and process-scheduled/route.ts
+│   │   ├── espProvider.ts            # sendEmail() — AWS SES switch via ESP_PROVIDER
+│   │   ├── renderTemplateHtml.ts     # Server-safe (no React) block-to-HTML renderer for real sends
+│   │   └── snsVerify.ts              # verifySnsSignature() — manual SNS signature verification
 │   ├── config/
 │   │   └── starterTemplates.ts       # Static starter template gallery data (app-level, not DB)
 │   ├── components/
@@ -135,10 +157,11 @@ shopify-email-app/
 │   │   ├── UpdateCustomerModal.tsx   # Edit customer fields
 │   │   ├── ViewCustomerPanel.tsx     # Slide-in panel with full customer details
 │   │   ├── DeleteConfirmModal.tsx    # Reusable delete warning dialog
+│   │   ├── ManageTagsModal.tsx       # Add/remove contact tags — single + bulk, autocomplete from GET /api/shopify/tags
 │   │   ├── ImportExportModal.tsx     # CSV import (3-step) + export with filter
 │   │   ├── TemplateEditor.tsx        # Block-based email editor (add/reorder/edit/preview) — text block uses TipTap
 │   │   ├── TemplateGallery.tsx       # "Start from template" gallery + "Generate with AI" (full) modal
-│   │   ├── TestSendModal.tsx         # Test-send stub modal — logs, never claims to deliver
+│   │   ├── TestSendModal.tsx         # Test-send modal — now sends a real email via the ESP, unchanged UI
 │   │   ├── CampaignWizard.tsx        # 4-step campaign builder (Basics/Template/Audience/Review) — shared by new + edit
 │   │   └── CampaignStatusBadge.tsx   # draft/scheduled/sending/sent badge — shared by list + detail pages
 │   └── app/
@@ -171,15 +194,18 @@ shopify-email-app/
 │       │   │   └── [id]/
 │       │   │       ├── page.tsx          # SSR-disabled wrapper — edit
 │       │   │       └── EditTemplate.tsx  # Edit page (+ Delete, Send Test)
-│       │   └── campaigns/
-│       │       ├── page.tsx          # SSR-disabled wrapper — list
-│       │       ├── Campaigns.tsx     # List page (table + Pagination) — Recipients/Scheduled-Sent only populate once sent
-│       │       ├── new/
-│       │       │   ├── page.tsx          # SSR-disabled wrapper — create
-│       │       │   └── NewCampaign.tsx   # Create page — header + CampaignWizard (create mode)
-│       │       └── [id]/
-│       │           ├── page.tsx          # SSR-disabled wrapper — detail
-│       │           └── CampaignDetail.tsx # draft/scheduled -> CampaignWizard (edit mode) + Delete; sent -> read-only summary + recipients + analytics stub
+│       │   ├── campaigns/
+│       │   │   ├── page.tsx          # SSR-disabled wrapper — list
+│       │   │   ├── Campaigns.tsx     # List page (table + Pagination) — Recipients/Scheduled-Sent only populate once sent
+│       │   │   ├── new/
+│       │   │   │   ├── page.tsx          # SSR-disabled wrapper — create
+│       │   │   │   └── NewCampaign.tsx   # Create page — header + CampaignWizard (create mode)
+│       │   │   └── [id]/
+│       │   │       ├── page.tsx          # SSR-disabled wrapper — detail
+│       │   │       └── CampaignDetail.tsx # draft/scheduled -> CampaignWizard (edit mode) + Delete; sent -> read-only summary + recipients + real bounce/complaint/failed analytics
+│       │   └── sending/
+│       │       ├── page.tsx          # SSR-disabled wrapper
+│       │       └── Sending.tsx       # ESP_PROVIDER/from-email display, sandbox status heuristic, test-send button
 │       └── api/
 │           ├── auth/
 │           │   ├── route.ts          # GET /api/auth?shop= — starts OAuth
@@ -197,10 +223,14 @@ shopify-email-app/
 │           │       ├── import/route.ts
 │           │       └── export/route.ts # GET — streams CSV, no row cap (unlike the list route)
 │           ├── webhooks/
-│           │   └── customers/route.ts # POST — customers/create + update
+│           │   ├── customers/route.ts # POST — customers/create + update
+│           │   └── ses/route.ts       # POST — SNS bounce/complaint/delivery notifications, see ESP section
 │           └── shopify/
-│               ├── sync-customers/route.ts
-│               ├── contacts/route.ts
+│               ├── sync-customers/route.ts   # Bulk sync — MERGES Shopify tags with app-added tags on upsert
+│               ├── contacts/
+│               │   ├── route.ts          # GET ?shop= — list; optional search/page/per_page (server-side, for the campaign contact picker) and ids= lookup
+│               │   └── tags/route.ts     # POST — add/remove tags on one or many contacts (normalized: trim/lowercase/dedupe)
+│               ├── tags/route.ts         # GET ?shop= — distinct tags across the shop's contacts, sorted (autocomplete + wizard multi-select)
 │               ├── customers/
 │               │   ├── create/route.ts
 │               │   ├── update/route.ts
@@ -211,14 +241,16 @@ shopify-email-app/
 │               │   ├── route.ts          # GET ?shop= — list, POST — create
 │               │   ├── [id]/route.ts     # PUT — update, DELETE
 │               │   ├── ai-generate/route.ts # POST — mode "full"|"block" via aiProvider.ts, strict JSON parsing; GET — dev-banner provider hint
-│               │   └── test-send/route.ts # POST — stub, logs to webhook_logs
-│               └── campaigns/
-│                   ├── route.ts                  # GET ?shop= — list (template name embedded), POST — create
-│                   ├── [id]/route.ts              # PUT — update, DELETE (draft/scheduled only)
-│                   ├── [id]/recipients/route.ts   # GET ?shop= — recipient list for the sent-campaign view
-│                   ├── audience-count/route.ts    # GET ?shop= — exact counts for all 4 segments, one round trip
-│                   ├── send/route.ts               # POST { campaign_id } — stub send (sendCampaignStub)
-│                   └── process-scheduled/route.ts  # GET/POST — cron-target stub, not wired to a scheduler yet
+│               │   └── test-send/route.ts # POST — real send via espProvider.ts; template_id optional (connection-check mode)
+│               ├── campaigns/
+│               │   ├── route.ts                  # GET ?shop= — list (template name embedded), POST — create
+│               │   ├── [id]/route.ts              # PUT — update, DELETE (draft/scheduled only)
+│               │   ├── [id]/recipients/route.ts   # GET ?shop= — recipient list for the sent-campaign view
+│               │   ├── audience-count/route.ts    # GET ?shop= — counts for the 4 fixed segments; POST { shop, audience_filter } — count for ANY filter (tag live count)
+│               │   ├── send/route.ts               # POST { campaign_id } — real send (campaignSend.ts), surfaces sent/failed counts
+│               │   └── process-scheduled/route.ts  # GET/POST — cron-target, not wired to a scheduler yet
+│               └── sending/
+│                   └── status/route.ts   # GET — ESP_PROVIDER + masked from-email + sandbox heuristic (GetSendQuotaCommand), no secrets
 ```
 
 ---
@@ -260,6 +292,22 @@ adds `created_at` to `campaign_recipients`. `campaigns.segment_id` (FK to the
 `segments` table) already existed but is untouched/unused by this feature —
 audience selection reuses the four fixed segments from `/shopify/customers`
 instead of the dynamic segments table; see Campaigns section below.
+
+**Run `db/esp_migration.sql` separately** — adds `complained_at` to
+`campaign_recipients`, for symmetry with the existing `sent_at`/`opened_at`/
+`clicked_at`/`bounced_at` columns. `campaign_recipients.status` is plain
+`text` with no enum/check constraint, so the new `"failed"` and
+`"complained"` status values (see ESP section below) needed no schema
+change of their own.
+
+**Run `db/tags_migration.sql` separately** — enforces `contacts.tags` as
+`text[] NOT NULL DEFAULT '{}'` (defensively converting a legacy text column
+by splitting on commas if one ever existed), normalizes all existing tag
+values (trim, lowercase, dedupe — required for the case-sensitive Postgres
+`&&` overlap operator used by tag audiences), and adds a GIN index on
+`contacts.tags`. Until it runs, pre-existing mixed-case tags (e.g. a synced
+`"VIP"`) won't match tag audiences; everything written after the tagging
+feature shipped is already normalized on write.
 
 ---
 
@@ -456,14 +504,20 @@ something to bake into the client bundle), so the modal asks the route via
 `NODE_ENV === "development"`, so it never shows in production regardless of
 what the GET returns.
 
-### Test Send — stub only (pending ESP integration, #9)
+### Test Send — real send via ESP (#9 DONE ✅)
 `Send Test` on the edit page opens `TestSendModal` → `POST
 /api/shopify/templates/test-send`. The route validates the email format,
-inserts a row into `webhook_logs` (`source: "esp"`, `topic:
-"test_send_stub"`), and returns `"Test send logged — ESP integration
-required to actually deliver"` — shown via the App Bridge toast. It never
-claims to have sent anything. Wire this up for real once an ESP
-(SendGrid/Resend/Postmark) is chosen.
+renders the template's blocks to HTML (`renderTemplateHtml`, see ESP
+Integration section below), and calls `sendEmail()` — a real send through
+whatever `ESP_PROVIDER` is configured, currently AWS SES. Logs the attempt
+to `webhook_logs` (`source: "esp"`, `topic: "test_send"`, includes the SES
+`MessageId`) and returns `"Test email sent to {address} ✅"` on success, or
+a 502 with SES's error message on failure — no more "logged, not delivered"
+disclaimer, because it now actually delivers (subject to AWS SES sandbox
+mode restrictions — see ESP Integration section). `template_id` is optional:
+omit it and the route sends a small hardcoded test message instead of
+rendering a saved template, which is what the Sending & ESP page's
+connection-check button does.
 
 ---
 
@@ -581,9 +635,10 @@ ngrok http 3000 --request-header-add "ngrok-skip-browser-warning: true"
 | 4 | Admin panel (login, dashboard, sidebar, shop list, /admin/shops management) | ✅ DONE |
 | 5 | Email templates (builder + save/reuse) | ✅ DONE |
 | 6 | Campaigns (create, send, analytics) | ✅ DONE |
+| 6b | Contact tagging + tag / specific-contact campaign audiences | ✅ DONE — see Contact Tagging section; run `db/tags_migration.sql` |
 | 7 | Scheduling | 🟡 Processing logic done, cron trigger not wired up — see Campaigns section |
 | 8 | Automation flows (journey builder + tick engine) | ⬜ |
-| 9 | ESP integration (SendGrid / Resend / Postmark) | ⬜ |
+| 9 | ESP integration (AWS SES) | ✅ DONE — open/click tracking is a known gap, pending further SES event configuration (see ESP Integration section) |
 | 10 | Billing + email credits (Shopify Billing API). Shop-level free/paid tracking lives in `/admin` using the existing `billing_plans` + `shop_subscriptions` tables — not a per-contact concept. (Per-contact membership tiers were built and then removed; see git history.) | ⬜ |
 | 11 | GDPR webhooks + compliance | ⬜ |
 
@@ -593,16 +648,20 @@ tied to `shop_subscriptions` → `billing_plans` (e.g. free tier = N generations
 day, paid tiers = higher or unlimited). Track usage via a new table or a
 daily counter column, reset at day boundary. Check plan tier server-side in
 `ai-generate/route.ts` before calling the Anthropic API, return 429 with a
-clear message if cap is hit.
+clear message if cap is hit. Now that campaign sending is real (#9), the same
+per-day-cap mechanism could reasonably key off actual send volume too
+(`campaign_recipients` rows, or the `webhook_logs` `campaign_send`/`test_send`
+entries) if usage-based billing tiers end up mattering more than generation
+counts — worth revisiting once billing plans are actually designed.
 
 ---
 
 ## Campaigns (DONE ✅)
 
 One-off broadcast campaigns: pick a template, pick an audience, save as
-draft, schedule for later, or send now. Sending is **stubbed** — same
-pattern as the template test-send stub (log the attempt, mark status, no
-real email delivery) — pending the ESP integration (#9).
+draft, schedule for later, or send now. Sending is **real** as of the ESP
+integration (#9) — see that section below for provider details, AWS SES
+sandbox mode caveats, and bounce/complaint handling.
 
 ### Status lifecycle
 ```
@@ -616,25 +675,42 @@ scheduled ──┘
 - **scheduled** — `scheduled_at` set. Editable, deletable. Picked up by
   `process-scheduled` once due.
 - **sending** — transient: set the instant "Send Now" is clicked or a
-  scheduled campaign becomes due, immediately followed by the stub-send
-  call in the same request. Not editable/deletable (in practice you'll
-  rarely observe this status at rest, since the stub send is synchronous).
-- **sent** — terminal. `sent_at` + `recipient_count` set, `campaign_recipients`
-  rows written. View-only from here — no more edits, no delete.
+  scheduled campaign becomes due, immediately followed by the send call in
+  the same request. Not editable/deletable (in practice you'll rarely
+  observe this status at rest, since the send loop runs synchronously in
+  the same request — see the ESP section for why it's sequential, not
+  parallel).
+- **sent** — terminal. `sent_at` + `recipient_count` set once every send has
+  been *attempted* (not necessarily succeeded — partial failures are normal,
+  especially in AWS SES sandbox mode). `campaign_recipients` rows written
+  with a per-contact outcome (`sent` or `failed`, later possibly `bounced`/
+  `complained`/`delivered` via the SNS webhook). View-only from here — no
+  more edits, no delete.
 
-### `audience_filter` JSONB shape
+### `audience_filter` JSONB shape (current — discriminated union)
 ```json
-{ "segment": "all" | "subscribed" | "frequent" | "unsubscribed" }
+{ "type": "segment",  "segment": "all" | "subscribed" | "frequent" | "unsubscribed" }
+{ "type": "tag",      "tags": ["vip", "wholesale"] }
+{ "type": "contacts", "contact_ids": ["uuid", "..."] }
 ```
-Reuses the exact four segments from `/shopify/customers` (`Customers.tsx`
-`SEGMENTS`) rather than the dynamic `segments` table, so audience selection
-matches how merchants already think about their contact list — defined once
-in `src/lib/audience.ts` (`AUDIENCE_SEGMENTS`, client-safe) and resolved to
-actual contacts server-side in `src/lib/audienceQueries.ts` (`subscribed`
-→ `subscribed = true`, `frequent` → `orders_count >= 3`, `unsubscribed` →
-`subscribed = false`, `all` → no filter). `"all"` and `"unsubscribed"` both
-include contacts who opted out, so both are flagged `warnUnsubscribed` for
-the stronger inline compliance warning in the Audience step. `campaigns.segment_id`
+Six audience options total: the four fixed segments from `/shopify/customers`
+(`Customers.tsx` `SEGMENTS`), plus "By tag" and "Specific contacts" (see the
+Contact Tagging section below). **Legacy rows** saved before the tagging
+feature hold the old `{ "segment": "..." }` shape with no `type` —
+`normalizeAudienceFilter()` in `src/lib/audience.ts` coerces any raw DB
+value (legacy shape, null, garbage) into the current union with a safe
+fallback of `{ type: "segment", segment: "subscribed" }`, and every consumer
+(labels, counts, sends, the wizard) runs values through it rather than
+trusting the row. Re-saving an old campaign migrates it to the new shape as
+a side effect. Segments are defined once in `src/lib/audience.ts`
+(`AUDIENCE_SEGMENTS`, client-safe) and ALL filter types resolve to contacts
+server-side in `src/lib/resolveAudience.ts` (`subscribed` → `subscribed =
+true`, `frequent` → `orders_count >= 3`, `unsubscribed` → `subscribed =
+false`, `all` → no filter, `tag` → `tags && selected AND subscribed = true`,
+`contacts` → `id IN (...)`). `"all"` and `"unsubscribed"` both include
+contacts who opted out, so both are flagged `warnUnsubscribed` for the
+stronger inline compliance warning in the Audience step; hand-picked
+unsubscribed contacts trigger the same warning. `campaigns.segment_id`
 (FK to the `segments` table) is left in the schema untouched — this feature
 never reads or writes it.
 
@@ -652,8 +728,10 @@ never reads or writes it.
   edit mode (pre-filled, PUT instead of POST) + a Delete button, reloads in
   place after saving instead of navigating away. Sent → read-only summary
   (template, audience, recipient count, sent date), an analytics block
-  (Opens/Clicks/Bounces shown as "—" with "requires ESP integration (#9)" —
-  never fabricated), and the recipient list (`[id]/recipients` route).
+  (real Bounces/Complaints/Failed counts from `campaign_recipients`; Opens/
+  Clicks stay "—" — SES doesn't track those without extra event-tracking
+  setup, see ESP section — never fabricated), and the recipient list
+  (`[id]/recipients` route) with a per-status colored badge.
 
 ### `CampaignWizard` (`src/components/CampaignWizard.tsx`)
 Shared 4-step builder used by both the new and detail pages (`campaignId`
@@ -673,22 +751,30 @@ prop present = edit/PUT, absent = create/POST):
    All three toast a result and call `onSaved()` — the parent decides whether
    that means "navigate to the list" (new) or "reload in place" (edit).
 
-### Stub send (`src/lib/campaignSend.ts` — `sendCampaignStub`)
+### Real send (`src/lib/campaignSend.ts` — `sendCampaign`)
 Shared by `POST .../send` (manual "Send Now") and `process-scheduled`:
-resolves `audience_filter` to contact ids (`resolveAudienceContactIds`),
-bulk-inserts one `campaign_recipients` row per contact with `status: "sent"`,
-updates the campaign (`status: "sent"`, `sent_at`, `recipient_count`), and
-logs to `webhook_logs` (`source: "esp"`, `topic: "campaign_send_stub"` — same
-`source` convention as the template test-send stub). Throws (caller returns
-400) if the campaign doesn't exist or is already sent, so a scheduled
-campaign can't be double-processed. Returns
-`"Campaign marked sent — ESP integration required for actual delivery"`,
-shown via toast — never implies real delivery happened.
+resolves `audience_filter` to full contact records (`resolveAudienceContacts`
+— email + name, not just ids), then for each contact **sequentially**
+renders the campaign's template with that contact's personalization tags
+(`renderTemplateHtml` + `resolveTags`, see ESP section) and calls
+`sendEmail()`. Every attempt gets its own `campaign_recipients` row —
+`status: "sent"` (with `esp_message_id`) or `status: "failed"` — so a
+partial failure is fully auditable per-contact, not just a lump count.
+Once every contact has been attempted, updates the campaign
+(`status: "sent"`, `sent_at`, `recipient_count`) and logs a summary to
+`webhook_logs` (`source: "esp"`, `topic: "campaign_send"`). Throws (caller
+returns 400) if the campaign doesn't exist, has no template, or is already
+sent, so a scheduled campaign can't be double-processed. `POST .../send`'s
+response includes `sent_count`/`failed_count` and a message that's honest
+about partial failure — e.g. *"Campaign sent to 3 of 10 recipients — 7
+failed"* — rather than a flat success/fail, since AWS SES sandbox mode
+means partial (or total) failure is the expected default until production
+access is granted.
 
 ### Scheduling (#7 — processing logic done, trigger not wired up)
 `GET`/`POST /api/shopify/campaigns/process-scheduled` finds every campaign
 with `status = "scheduled"` and `scheduled_at <= now()` and runs the same
-stub-send flow for each. Mirrors the `flow_runs.next_action_at` pattern
+real send flow for each. Mirrors the `flow_runs.next_action_at` pattern
 already planned for automation flows (#8), so the architecture stays
 consistent once a real background worker exists. **This route is not
 wired up to actually run on a schedule** — it needs an external trigger
@@ -700,7 +786,239 @@ itself can be verified independent of a real scheduler.
 
 ---
 
-## Accounts
+## Contact Tagging & Tag/Specific-Contact Audiences (DONE ✅)
+
+App-only contact tags plus two new campaign audience types. **Tags are never
+synced back to Shopify** — the customer sync + webhook merge Shopify's tags
+INTO ours, never the reverse.
+
+### Storage & normalization
+- `contacts.tags` is `text[] NOT NULL DEFAULT '{}'` with a GIN index (run
+  `db/tags_migration.sql` — see Database schema section).
+- Every tag is normalized (trim, lowercase, dedupe) at every write path via
+  `src/lib/tags.ts` (`normalizeTag`/`normalizeTags`/`tagsFromShopifyString`/
+  `mergeTags`, client-safe). Lowercasing matters because Postgres's `&&`
+  array-overlap operator (tag audiences) is case-sensitive.
+- **Shopify sync + webhook upserts MERGE tags** (`mergeTags(existing,
+  incoming)`) instead of overwriting, so tags added in-app survive Shopify
+  customer updates. Consequence: a tag deleted in Shopify never disappears
+  here — remove it via ManageTagsModal instead.
+
+### API
+- `POST /api/shopify/contacts/tags` — `{ shop, contactIds[], addTags[],
+  removeTags[] }`, single or bulk, shop-scoped, normalizes before writing.
+- `GET /api/shopify/tags?shop=` — distinct tags across the shop's contacts,
+  sorted, for autocomplete + the wizard's tag multi-select.
+- `GET /api/shopify/contacts` grew optional params for the wizard's contact
+  picker: `search=` (server-side ilike on email/first/last name), `page=` +
+  `per_page=` (server-side range pagination, `{ contacts, total }`), and
+  `ids=` (comma-separated lookup for chip labels when editing a saved
+  "specific contacts" campaign). With none of these it behaves exactly as
+  before (newest 100) for `Customers.tsx`.
+
+### UI
+- **Customers page**: 🏷 per-row action + "Manage Tags" in the bulk action
+  bar, both opening `ManageTagsModal` (chips with remove buttons in single
+  mode, add-only in bulk mode with "Applying to N contacts", autocomplete
+  with a "Create «tag»" option). Tags column shows up to 3 chips + a "+N"
+  overflow with the rest in its tooltip.
+- **Campaign wizard Audience step**: two options after the four segments —
+  **By tag** (chip multi-select of the shop's tags, live recipient count via
+  `POST audience-count`, debounced; tag audiences ALWAYS exclude
+  unsubscribed contacts — a tag is not consent) and **Specific contacts**
+  (server-searched, paginated picker using the shared `Pagination`
+  component, removable selection chips, UNSUBSCRIBED badge per row and a red
+  warning when any selected contact is unsubscribed — this type deliberately
+  doesn't force the subscribed filter, mirroring how "All contacts" works).
+- The wizard keeps each audience type's half-built selection in separate
+  state, so toggling between radio options doesn't lose a tag/contact
+  selection; the stored filter is assembled from whichever type is active
+  on save.
+
+See the Campaigns section above for the `audience_filter` JSONB union shape,
+the legacy-row fallback (`normalizeAudienceFilter`), and
+`src/lib/resolveAudience.ts` — the single place all six audience types
+resolve to contacts for both count previews and real sends.
+
+---
+
+## ESP Integration — AWS SES (DONE ✅)
+
+Real email sending, architected behind a swappable provider interface —
+same pattern as `src/lib/aiProvider.ts` for Gemini/Anthropic — so
+SendGrid/Resend/Postmark can be added later without touching any calling
+code (`TestSendModal`, `campaignSend.ts`, etc. only ever call `sendEmail()`).
+
+**SDK:** `@aws-sdk/client-ses` (v3, `SESClient` + `SendEmailCommand` — the
+classic v1 SES API, not sesv2). `@aws-sdk/client-sns` is also installed but
+SNS signature verification is done manually with Node's built-in `crypto`
+(see `snsVerify.ts` below). **Env vars actually used** (note the `AWS_SES_`
+prefix, NOT the SDK-default `AWS_REGION`/`AWS_ACCESS_KEY_ID` names — creds
+are passed explicitly to the client): `AWS_SES_REGION`,
+`AWS_SES_ACCESS_KEY_ID`, `AWS_SES_SECRET_ACCESS_KEY`, `AWS_SES_FROM_EMAIL`
+(must be a verified SES identity), `AWS_SES_CONFIGURATION_SET` (optional —
+only needed for bounce/complaint events), `ESP_PROVIDER=aws_ses`.
+
+**Current account state (verified live via `GET /api/shopify/sending/status`,
+2026-07-14):** the account **is in sandbox mode** — max send rate 1/sec,
+200 sends/24h. The configured from-address is the Partners-account Gmail
+(zombie.coder.dev@gmail.com) and is necessarily a verified identity (SES
+rejects unverified senders outright). While in sandbox, sends only succeed
+to verified identities or SES Mailbox Simulator addresses
+(`success@simulator.amazonses.com` etc.) — check the SES console's Verified
+identities page for the authoritative list.
+
+### ⚠️ AWS SES sandbox mode — read this before testing
+**Every new AWS SES account starts in sandbox mode.** It can only send to
+email addresses/domains you've manually verified in the SES console (or
+the built-in Mailbox Simulator addresses) — sends to anyone else fail
+outright. This is not a bug in this integration; it's AWS's default for
+every new account, to prevent spam. **Real campaign sends to your actual
+contact list will fail until you request production access** (SES console
+→ **Account dashboard → Request production access** — a short form, usually
+approved within 24 hours). Until then:
+- Verify your own inbox as an identity first, so test-send and the Sending
+  & ESP page's connection-check button have something to succeed against.
+- Expect campaign sends to real contacts to show partial or total failure
+  in the `sent_count`/`failed_count` response — that's expected, not a bug.
+- The "Sending & ESP" page (`/shopify/sending`) shows a best-effort sandbox
+  status heuristic to help you tell whether you're still restricted.
+
+### `src/lib/espProvider.ts` — provider abstraction
+```ts
+sendEmail({ to, subject, html, campaignId?, contactId? })
+  → { success: boolean, messageId?: string, error?: string }
+```
+Reads `ESP_PROVIDER` and branches — currently only `"aws_ses"` is
+implemented, throws a clear error for anything else (unset or unrecognized).
+Return shape is identical no matter which branch runs, so callers never
+know or care which ESP is active. `campaignId`/`contactId`, when provided,
+are attached as SES message tags (`Tags: [{Name, Value}]` on
+`SendEmailCommand`) — SES echoes these back verbatim in every bounce/
+complaint/delivery SNS notification (`mail.tags`), which is how the SNS
+webhook correlates an event back to a `campaign_recipients` row without
+needing a separate id-mapping table.
+
+**Adding a new provider later** (SendGrid/Resend/Postmark): add a new
+`case`/branch in `sendEmail()` that calls the new provider's SDK and maps
+its response into the same `{ success, messageId?, error? }` shape, add its
+env vars, and flip `ESP_PROVIDER`. No other file needs to change — every
+caller already goes through `sendEmail()`.
+
+### `src/lib/renderTemplateHtml.ts` — server-safe HTML rendering
+`TemplateEditor.tsx`'s preview renderer (`PreviewBlock`) is React/JSX and
+lives in a "use client" file that's off-limits for this task (templates
+editor — do not touch), so this is a **parallel, self-contained** renderer
+— pure string building, no React, safe to call from an API route — that
+mirrors the same block-type handling (header/text/image/button/divider/
+footer). The two will need to be kept in sync by hand if a new block type
+is ever added. Notable differences from the in-app preview: buttons render
+as real clickable `<a href>` anchors (the preview is a visual-only span),
+and personalization tag values are HTML-escaped before substitution
+(`escapeSampleValues`) so a contact name containing `&`/`<` can't break the
+outbound HTML — the preview never needed this since it only ever
+substitutes safe static sample values ("John"/"Doe"). `resolveTags()` is
+also exported and used un-escaped for the plain-text subject line.
+
+### Wired up (replaced all three stubs)
+- **Template test-send** (`/api/shopify/templates/test-send`) — renders the
+  template via `renderTemplateHtml` and calls `sendEmail()` for real.
+  `template_id` is optional; omitted, it sends a small hardcoded message
+  instead, which is what the Sending & ESP page's connection-check uses.
+- **Campaign send** (`src/lib/campaignSend.ts` → `sendCampaign()`) — real
+  per-contact send with personalization, sequential (not parallel — SES
+  enforces an account-wide max send rate, as low as 1/sec in sandbox mode;
+  see `GetSendQuotaCommand` in the Sending & ESP page). See the Campaigns
+  section above for the full status-transition and partial-failure details.
+- **Scheduled processing** (`process-scheduled`) — no structural change
+  needed; it already called the shared send function, which is now real.
+
+### Bounce/complaint handling — SNS, not a simple webhook
+AWS SES doesn't POST to your app directly. Bounce/complaint/delivery events
+go through **SNS** (Simple Notification Service): SES → configuration set →
+SNS topic → HTTP subscription → your route. This requires manual AWS
+console setup that can't be done from code:
+
+1. **Verify a sender identity** — SES console → **Verified identities** →
+   verify either a single email address (quick, for testing) or a whole
+   domain (recommended for production — adds DKIM). Must match
+   `AWS_SES_FROM_EMAIL`'s domain.
+2. **Create an SNS topic** — SNS console → **Topics** → create a Standard
+   topic (e.g. `ses-email-events`). Note its ARN.
+3. **Subscribe your app to the topic** — in the same topic, **Create
+   subscription** → protocol `HTTPS` → endpoint
+   `https://<your-app-url>/api/webhooks/ses`. SNS immediately POSTs a
+   `SubscriptionConfirmation` message to that URL — the route
+   auto-confirms it by fetching the included `SubscribeURL`, so the
+   subscription should flip to "Confirmed" within a few seconds if your
+   app is reachable. (Must be a publicly reachable HTTPS URL — use your
+   ngrok URL for local dev, same as the Shopify OAuth callback.)
+4. **Create an SES configuration set** — SES console → **Configuration
+   sets** → create one (e.g. `campaign-sends`) → add an **Event
+   destination** → destination type SNS → select the topic from step 2 →
+   choose event types: **Bounces**, **Complaints**, and optionally
+   **Deliveries**. Set its name as `AWS_SES_CONFIGURATION_SET` — every send
+   already passes `ConfigurationSetName` on `SendEmailCommand`
+   (`espProvider.ts`), so events start flowing to SNS as soon as this env
+   var is set; nothing else to wire up in code. Leave it unset and sends
+   still work fine, just without any events published (so the SNS webhook
+   would never receive anything).
+5. **Request production access** (see sandbox warning above) — without
+   this, you can only meaningfully test bounce handling using SES's
+   [Mailbox Simulator](https://docs.aws.amazon.com/ses/latest/dg/send-an-email-from-console.html)
+   bounce/complaint addresses, since sandbox mode blocks sends to anyone else.
+
+### `src/app/api/webhooks/ses/route.ts` + `src/lib/snsVerify.ts`
+- Parses the SNS envelope; handles `SubscriptionConfirmation`/
+  `UnsubscribeConfirmation` by fetching `SubscribeURL` automatically.
+- **Verifies the SNS message signature before trusting anything**
+  (`verifySnsSignature`) — manual implementation of
+  [AWS's documented algorithm](https://docs.aws.amazon.com/sns/latest/dg/sns-verify-signature-of-message.html)
+  using Node's built-in `crypto` (no extra package — `@aws-sdk/client-sns`
+  is a delivery client, not a verifier). Also checks `SigningCertURL`'s
+  hostname matches `sns.<region>.amazonaws.com` before fetching it, so an
+  attacker can't point it at a self-signed cert. Fails closed: any error
+  (bad host, fetch failure, signature mismatch) drops the message.
+  **Not yet exercised against a real AWS-signed message** in this
+  environment — there was no live SNS topic to generate one against. Treat
+  the first real `SubscriptionConfirmation` after setup as the actual test,
+  and check server logs / `webhook_logs` for a silent rejection if the
+  subscription doesn't confirm.
+- Parses `Bounce`/`Complaint`/`Delivery` from the notification body
+  (handles both `eventType` — configuration-set event publishing — and
+  `notificationType` — classic notifications — field names), matches back
+  to a `campaign_recipients` row via `mail.tags.campaignId`/`contactId`,
+  and updates its `status` to `"bounced"`/`"complained"`/`"delivered"`
+  accordingly (plus `bounced_at`/`complained_at`).
+- Logs the raw payload to `webhook_logs` (`source: "esp"`, `topic:
+  "ses_bounce"`/`"ses_complaint"`/etc.) — same convention as the Shopify
+  webhook handler.
+- **Always returns 200 quickly**, even on a dropped/unverified message —
+  SNS retries (and can eventually auto-disable the subscription) on
+  non-2xx, same reasoning as `/api/webhooks/customers`.
+
+### Analytics — what's real vs. what's honestly missing
+On a sent campaign's view page: **Bounces**, **Complaints**, and **Failed**
+counts are real, computed from `campaign_recipients.status`. **Opens** and
+**Clicks** stay "—" with an explicit note — SES doesn't track those without
+additional configuration (open-pixel injection + link rewriting, which SES
+doesn't do out-of-the-box the way SendGrid/Postmark do) — this is a known
+gap, not faked data.
+
+### Sending & ESP settings page (`/shopify/sending`)
+Read-only (env vars aren't editable from the UI in this task):
+- Current `ESP_PROVIDER` and a masked `AWS_SES_FROM_EMAIL`
+  (`GET /api/shopify/sending/status` — never returns the secret key).
+- Sandbox-mode heuristic via `GetSendQuotaCommand` — SES v1's API has no
+  actual "am I in sandbox" boolean (`GetAccountSendingEnabled` only reports
+  whether sending is paused account-wide, not sandbox status), so this
+  compares `Max24HourSend`/`MaxSendRate` against AWS's fixed sandbox
+  defaults (200/day, 1/sec) as a heuristic, clearly labeled as such — not a
+  guaranteed signal. Falls back to a static explanation of sandbox mode and
+  how to request production access if the check fails (missing
+  credentials, API error, or a non-SES provider).
+- A "Send Test" button that calls `test-send` with no `template_id`, to
+  verify the AWS connection independent of any saved template.
 - Shopify Partners: zombie.coder.dev@gmail.com
 - Dev store: dev-lag.myshopify.com
 - Supabase project: (add your URL here)
@@ -720,3 +1038,8 @@ itself can be verified independent of a real scheduler.
 - `feat: view/edit/delete customers with multi-select bulk delete`
 - `feat: membership system with config, bulk change, and audit logs`
 - `feat: admin panel with login, dashboard, sidebar, shop overview`
+- `feat: collapsible sidebar toggle for shop app and admin panel`
+- `feat: admin panel completion — shop management, cross-shop contacts, remove per-contact membership`
+- `feat: email template builder with TipTap, starter gallery, and AI generation`
+- `feat: campaigns with scheduling stub, template AI generation with Gemini/Anthropic toggle, admin contacts, sidebar shop-param fix`
+- `feat: AWS SES email sending (ESP integration) + contact tagging with tag/specific-contact campaign audiences`

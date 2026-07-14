@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",
+    "@aws-sdk/client-ses": "^3.1085.0",
+    "@aws-sdk/client-sns": "^3.1085.0",
     "@google/generative-ai": "^0.24.1",
     "@shopify/app-bridge-react": "^4.2.11",
     "@shopify/shopify-api": "^13.1.0",

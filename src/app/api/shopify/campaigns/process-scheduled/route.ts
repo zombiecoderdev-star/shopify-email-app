@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { sendCampaignStub } from "@/lib/campaignSend";
+import { sendCampaign } from "@/lib/campaignSend";
 
 // GET/POST /api/shopify/campaigns/process-scheduled
 //
 // Finds every campaign with status "scheduled" whose scheduled_at has
-// passed, and runs the same stub-send flow (src/lib/campaignSend.ts) for
+// passed, and runs the same real send flow (src/lib/campaignSend.ts) for
 // each. Mirrors the flow_runs.next_action_at pattern already noted in
 // HANDOFF.md for future background jobs (#8 automation flows), so this
 // stays architecturally consistent when a real job runner gets built.
@@ -29,12 +29,12 @@ async function processScheduled() {
 
   if (error) throw new Error(error.message);
 
-  const results: { campaign_id: string; success: boolean; recipient_count?: number; error?: string }[] = [];
+  const results: { campaign_id: string; success: boolean; recipient_count?: number; sent_count?: number; failed_count?: number; error?: string }[] = [];
 
   for (const c of due || []) {
     try {
-      const { recipient_count } = await sendCampaignStub(c.id);
-      results.push({ campaign_id: c.id, success: true, recipient_count });
+      const { recipient_count, sent_count, failed_count } = await sendCampaign(c.id);
+      results.push({ campaign_id: c.id, success: true, recipient_count, sent_count, failed_count });
     } catch (err: any) {
       results.push({ campaign_id: c.id, success: false, error: err?.message || "Send failed" });
     }

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { normalizeAudienceFilter } from "@/lib/audience";
 
 const VALID_STATUSES = ["draft", "scheduled", "sending"];
 const EDITABLE_STATUSES = ["draft", "scheduled"];
@@ -56,7 +57,9 @@ export async function PUT(
       template_id,
       name,
       subject,
-      audience_filter: audience_filter || { segment: "subscribed" },
+      // Re-saving an old campaign migrates its legacy { segment } filter to
+      // the current discriminated shape as a side effect.
+      audience_filter: normalizeAudienceFilter(audience_filter),
       status: status || existing.status,
       scheduled_at: status === "scheduled" ? scheduled_at : null,
       updated_at: new Date().toISOString(),

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { countAllAudienceSegments } from "@/lib/audienceQueries";
+import { countAllAudienceSegments, countAudience } from "@/lib/resolveAudience";
 
 // GET /api/shopify/campaigns/audience-count?shop=xxx
 // Returns exact recipient counts for all four audience segments in one
@@ -10,6 +10,15 @@ import { countAllAudienceSegments } from "@/lib/audienceQueries";
 // /api/shopify/contacts, which caps at 100 rows) so it stays accurate at
 // any list size.
 
+async function shopIdFromDomain(shop: string): Promise<string | null> {
+  const { data: shopRow } = await supabaseAdmin
+    .from("shops")
+    .select("id")
+    .eq("shop_domain", shop)
+    .single();
+  return shopRow?.id ?? null;
+}
+
 export async function GET(req: NextRequest) {
   const shop = req.nextUrl.searchParams.get("shop");
 
@@ -17,20 +26,48 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Missing shop" }, { status: 400 });
   }
 
-  const { data: shopRow } = await supabaseAdmin
-    .from("shops")
-    .select("id")
-    .eq("shop_domain", shop)
-    .single();
-
-  if (!shopRow) {
+  const shopId = await shopIdFromDomain(shop);
+  if (!shopId) {
     return NextResponse.json({ error: "Shop not found" }, { status: 404 });
   }
 
   try {
-    const counts = await countAllAudienceSegments(shopRow.id);
+    const counts = await countAllAudienceSegments(shopId);
     return NextResponse.json({ counts });
-  } catch (err: any) {
-    return NextResponse.json({ error: err?.message || "Failed to count audience" }, { status: 500 });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Failed to count audience" },
+      { status: 500 }
+    );
+  }
+}
+
+// POST /api/shopify/campaigns/audience-count
+// Body: { shop, audience_filter }
+// Returns { count } for ANY audience filter shape (segment / tag / specific
+// contacts) via the same resolveAudience logic the actual send uses — this
+// is what the wizard's "By tag" live recipient count calls as tags are
+// toggled.
+
+export async function POST(req: NextRequest) {
+  const { shop, audience_filter } = await req.json();
+
+  if (!shop) {
+    return NextResponse.json({ error: "Missing shop" }, { status: 400 });
+  }
+
+  const shopId = await shopIdFromDomain(shop);
+  if (!shopId) {
+    return NextResponse.json({ error: "Shop not found" }, { status: 404 });
+  }
+
+  try {
+    const count = await countAudience(shopId, audience_filter);
+    return NextResponse.json({ count });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Failed to count audience" },
+      { status: 500 }
+    );
   }
 }

@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { sendCampaignStub } from "@/lib/campaignSend";
+import { sendCampaign } from "@/lib/campaignSend";
 
 // POST /api/shopify/campaigns/send
 // Body: { campaign_id }
-// Stub send — no ESP integration yet (#9). See src/lib/campaignSend.ts for
-// what actually happens (resolves audience, writes campaign_recipients,
-// flips status to "sent"). Never claims to have actually delivered mail.
+// Real send via the configured ESP — see src/lib/campaignSend.ts. Surfaces
+// partial failure counts rather than a flat success/fail, since some
+// recipients failing (e.g. unverified addresses while AWS SES is still in
+// sandbox mode) doesn't mean the whole send failed.
 
 export async function POST(req: NextRequest) {
   const { campaign_id } = await req.json();
@@ -15,11 +16,23 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { recipient_count } = await sendCampaignStub(campaign_id);
+    const { recipient_count, sent_count, failed_count } = await sendCampaign(campaign_id);
+
+    const message =
+      recipient_count === 0
+        ? "Campaign sent — no recipients matched the selected audience"
+        : failed_count === 0
+        ? `Campaign sent to ${sent_count} recipient${sent_count === 1 ? "" : "s"}`
+        : sent_count === 0
+        ? `Campaign send failed for all ${failed_count} recipients — check AWS SES configuration (sandbox mode only allows verified addresses)`
+        : `Campaign sent to ${sent_count} of ${recipient_count} recipients — ${failed_count} failed (see recipient list)`;
+
     return NextResponse.json({
       success: true,
       recipient_count,
-      message: "Campaign marked sent — ESP integration required for actual delivery",
+      sent_count,
+      failed_count,
+      message,
     });
   } catch (err: any) {
     return NextResponse.json({ error: err?.message || "Send failed" }, { status: 400 });

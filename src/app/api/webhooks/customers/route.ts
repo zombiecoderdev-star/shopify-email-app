@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { SHOPIFY_API_SECRET } from "@/lib/shopify";
+import { mergeTags, tagsFromShopifyString } from "@/lib/tags";
 import crypto from "crypto";
 
 // POST /api/webhooks/customers
@@ -41,7 +42,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true });
   }
 
-  // 3. Upsert contact
+  // 3. Upsert contact. Tags are MERGED with what's already stored, not
+  // overwritten — tags added inside the app (ManageTagsModal) only exist
+  // here, so letting Shopify's tag string win would silently wipe them.
+  const { data: existingContact } = await supabaseAdmin
+    .from("contacts")
+    .select("tags")
+    .eq("shop_id", shopRow.id)
+    .eq("shopify_customer_id", customer.id)
+    .maybeSingle();
+
   await supabaseAdmin.from("contacts").upsert(
     {
       shop_id: shopRow.id,
@@ -50,7 +60,7 @@ export async function POST(req: NextRequest) {
       first_name: customer.first_name || null,
       last_name: customer.last_name || null,
       phone: customer.phone || null,
-      tags: customer.tags ? customer.tags.split(", ").filter(Boolean) : [],
+      tags: mergeTags(existingContact?.tags, tagsFromShopifyString(customer.tags)),
       total_spent: parseFloat(customer.total_spent || "0"),
       orders_count: customer.orders_count || 0,
       subscribed:

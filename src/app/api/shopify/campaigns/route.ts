@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { normalizeAudienceFilter } from "@/lib/audience";
 
 // GET /api/shopify/campaigns?shop=xxx
 // Returns campaigns for the given shop, with the template name embedded
@@ -72,7 +73,10 @@ export async function POST(req: NextRequest) {
       template_id,
       name,
       subject,
-      audience_filter: audience_filter || { segment: "subscribed" },
+      // Always stored in the current discriminated shape — legacy
+      // { segment } payloads and anything malformed normalize to a safe
+      // default (subscribers only).
+      audience_filter: normalizeAudienceFilter(audience_filter),
       status: status || "draft",
       scheduled_at: status === "scheduled" ? scheduled_at : null,
     })

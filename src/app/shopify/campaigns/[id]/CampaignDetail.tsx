@@ -8,7 +8,7 @@ import { ArrowLeft, Trash2 } from "lucide-react";
 import CampaignWizard from "@/components/CampaignWizard";
 import CampaignStatusBadge from "@/components/CampaignStatusBadge";
 import DeleteConfirmModal from "@/components/DeleteConfirmModal";
-import { audienceSegmentLabel, type AudienceFilter } from "@/lib/audience";
+import { audienceFilterLabel } from "@/lib/audience";
 
 type Campaign = {
   id: string;
@@ -16,7 +16,10 @@ type Campaign = {
   subject: string;
   status: "draft" | "scheduled" | "sending" | "sent";
   template_id: string | null;
-  audience_filter: AudienceFilter | null;
+  // Raw JSONB from the DB — old rows may still be the legacy { segment }
+  // shape, so this is normalized wherever it's consumed (label helper,
+  // wizard) rather than trusted here.
+  audience_filter: unknown;
   scheduled_at: string | null;
   sent_at: string | null;
   recipient_count: number;
@@ -153,7 +156,7 @@ export default function CampaignDetail() {
           initialName={campaign.name}
           initialSubject={campaign.subject}
           initialTemplateId={campaign.template_id}
-          initialAudienceFilter={campaign.audience_filter || { segment: "subscribed" }}
+          initialAudienceFilter={campaign.audience_filter}
           initialScheduledAt={campaign.scheduled_at}
           onSaved={load}
           showToast={toast}
@@ -185,19 +188,24 @@ function SentCampaignView({ campaign, recipients, loadingRecipients }: {
     <div className="space-y-5">
       <div className="bg-white rounded-xl border border-gray-200 p-5 grid grid-cols-2 md:grid-cols-4 gap-4">
         <SummaryStat label="Template" value={campaign.templates?.name || "—"} />
-        <SummaryStat label="Audience" value={audienceSegmentLabel(campaign.audience_filter)} />
+        <SummaryStat label="Audience" value={audienceFilterLabel(campaign.audience_filter)} />
         <SummaryStat label="Recipients" value={String(campaign.recipient_count)} />
         <SummaryStat label="Sent" value={formatDate(campaign.sent_at)} />
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 p-5">
         <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Analytics</p>
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
           <SummaryStat label="Opens" value="—" />
           <SummaryStat label="Clicks" value="—" />
-          <SummaryStat label="Bounces" value="—" />
+          <SummaryStat label="Bounces" value={String(recipients.filter((r) => r.status === "bounced").length)} />
+          <SummaryStat label="Complaints" value={String(recipients.filter((r) => r.status === "complained").length)} />
+          <SummaryStat label="Failed" value={String(recipients.filter((r) => r.status === "failed").length)} />
         </div>
-        <p className="text-xs text-gray-400 mt-3">Open/click tracking requires ESP integration (#9).</p>
+        <p className="text-xs text-gray-400 mt-3">
+          Bounces/complaints come from real AWS SES/SNS notifications. Open/click tracking requires
+          additional SES event tracking setup (not yet configured).
+        </p>
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -226,7 +234,7 @@ function SentCampaignView({ campaign, recipients, loadingRecipients }: {
                     <p className="text-xs text-gray-400">{r.contacts?.email}</p>
                   </td>
                   <td className="px-5 py-2.5">
-                    <span className="inline-flex px-2 py-0.5 rounded text-xs font-semibold bg-green-100 text-green-700 uppercase">
+                    <span className={`inline-flex px-2 py-0.5 rounded text-xs font-semibold uppercase ${recipientStatusStyle(r.status)}`}>
                       {r.status}
                     </span>
                   </td>
@@ -238,6 +246,18 @@ function SentCampaignView({ campaign, recipients, loadingRecipients }: {
       </div>
     </div>
   );
+}
+
+const RECIPIENT_STATUS_STYLES: Record<string, string> = {
+  sent: "bg-green-100 text-green-700",
+  delivered: "bg-green-100 text-green-700",
+  bounced: "bg-red-100 text-red-700",
+  complained: "bg-red-100 text-red-700",
+  failed: "bg-gray-200 text-gray-600",
+};
+
+function recipientStatusStyle(status: string) {
+  return RECIPIENT_STATUS_STYLES[status] || "bg-gray-100 text-gray-600";
 }
 
 function SummaryStat({ label, value }: { label: string; value: string }) {
