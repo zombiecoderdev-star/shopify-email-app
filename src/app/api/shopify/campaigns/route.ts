@@ -39,9 +39,12 @@ export async function GET(req: NextRequest) {
 // POST /api/shopify/campaigns
 // Body: { shop, name, subject, template_id, audience_filter, status?, scheduled_at? }
 // Creates a campaign. status defaults to "draft"; pass "scheduled" with
-// scheduled_at, or "sending" right before calling POST .../send.
+// scheduled_at. "sending"/"sent"/"failed" are NOT accepted here — only the
+// send flow itself (POST [id]/send → campaignSend.ts's atomic claim) may set
+// them, otherwise a client could wedge a campaign in "sending" and block
+// the 409 double-send guard forever.
 
-const VALID_STATUSES = ["draft", "scheduled", "sending"];
+const VALID_STATUSES = ["draft", "scheduled"];
 
 export async function POST(req: NextRequest) {
   const { shop, name, subject, template_id, audience_filter, status, scheduled_at } = await req.json();

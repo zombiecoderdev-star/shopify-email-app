@@ -291,11 +291,13 @@ export default function CampaignWizard({
     if (!validate()) return;
     setSaving("send");
     try {
-      const campaign = await persistCampaign("sending", null);
-      const res = await fetch("/api/shopify/campaigns/send", {
+      // Persist as draft first — the send route itself owns the
+      // draft/scheduled → sending transition (atomic claim, 409 on
+      // double-send), so if this request dies mid-way the campaign is a
+      // recoverable draft instead of being stuck in "sending".
+      const campaign = await persistCampaign("draft", null);
+      const res = await fetch(`/api/shopify/campaigns/${campaign.id}/send?shop=${shop}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ campaign_id: campaign.id }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Send failed");

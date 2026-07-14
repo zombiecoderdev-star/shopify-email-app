@@ -37,15 +37,31 @@ export async function GET(
     return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
   }
 
+  // `error` (per-recipient send failure message) comes from
+  // db/campaign_send_migration.sql — if that migration hasn't run yet,
+  // retry without the column instead of 500ing the recipient list, same
+  // defensive-optional-column convention as shops.last_synced_at.
   const { data: recipients, error } = await supabaseAdmin
+    .from("campaign_recipients")
+    .select("id, status, error, created_at, contacts(email, first_name, last_name)")
+    .eq("campaign_id", id)
+    .order("created_at", { ascending: false });
+
+  if (!error) {
+    return NextResponse.json({ recipients });
+  }
+
+  const { data: fallback, error: fallbackError } = await supabaseAdmin
     .from("campaign_recipients")
     .select("id, status, created_at, contacts(email, first_name, last_name)")
     .eq("campaign_id", id)
     .order("created_at", { ascending: false });
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  if (fallbackError) {
+    return NextResponse.json({ error: fallbackError.message }, { status: 500 });
   }
 
-  return NextResponse.json({ recipients });
+  return NextResponse.json({
+    recipients: (fallback || []).map((r) => ({ ...r, error: null })),
+  });
 }

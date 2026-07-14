@@ -4,17 +4,18 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useAppBridge } from "@shopify/app-bridge-react";
-import { ArrowLeft, Trash2 } from "lucide-react";
+import { ArrowLeft, Trash2, Send } from "lucide-react";
 import CampaignWizard from "@/components/CampaignWizard";
 import CampaignStatusBadge from "@/components/CampaignStatusBadge";
 import DeleteConfirmModal from "@/components/DeleteConfirmModal";
+import TestSendModal from "@/components/TestSendModal";
 import { audienceFilterLabel } from "@/lib/audience";
 
 type Campaign = {
   id: string;
   name: string;
   subject: string;
-  status: "draft" | "scheduled" | "sending" | "sent";
+  status: "draft" | "scheduled" | "sending" | "sent" | "failed";
   template_id: string | null;
   // Raw JSONB from the DB — old rows may still be the legacy { segment }
   // shape, so this is normalized wherever it's consumed (label helper,
@@ -30,6 +31,7 @@ type Campaign = {
 type Recipient = {
   id: string;
   status: string;
+  error: string | null;
   created_at: string;
   contacts: { email: string; first_name: string | null; last_name: string | null } | null;
 };
@@ -55,6 +57,7 @@ export default function CampaignDetail() {
   const [loadingRecipients, setLoadingRecipients] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [showTestSend, setShowTestSend] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -72,7 +75,7 @@ export default function CampaignDetail() {
   useEffect(() => { load(); }, [params.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (campaign?.status !== "sent") return;
+    if (campaign?.status !== "sent" && campaign?.status !== "failed") return;
     setLoadingRecipients(true);
     fetch(`/api/shopify/campaigns/${params.id}/recipients?shop=${shop}`)
       .then((res) => res.json())
@@ -136,16 +139,30 @@ export default function CampaignDetail() {
             <CampaignStatusBadge status={campaign.status} />
           </div>
           <p className="text-sm text-gray-400 mt-1">
-            {editable ? "Draft and scheduled campaigns can still be edited." : "This campaign has been sent and is view-only."}
+            {editable
+              ? "Draft and scheduled campaigns can still be edited."
+              : campaign.status === "failed"
+              ? "This campaign send failed for every recipient — see the recipient list below for error details."
+              : "This campaign has been sent and is view-only."}
           </p>
         </div>
         {editable && (
-          <button
-            onClick={() => setShowDelete(true)}
-            className="flex items-center gap-1.5 px-3 py-2 border border-red-200 text-red-500 text-sm font-medium rounded-lg hover:bg-red-50 transition-colors"
-          >
-            <Trash2 size={14} /> Delete
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowTestSend(true)}
+              disabled={!campaign.template_id}
+              title={campaign.template_id ? "Send a test copy of this campaign's email" : "Pick a template first"}
+              className="flex items-center gap-1.5 px-3 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors"
+            >
+              <Send size={14} /> Send Test
+            </button>
+            <button
+              onClick={() => setShowDelete(true)}
+              className="flex items-center gap-1.5 px-3 py-2 border border-red-200 text-red-500 text-sm font-medium rounded-lg hover:bg-red-50 transition-colors"
+            >
+              <Trash2 size={14} /> Delete
+            </button>
+          </div>
         )}
       </div>
 
@@ -163,6 +180,15 @@ export default function CampaignDetail() {
         />
       ) : (
         <SentCampaignView campaign={campaign} recipients={recipients} loadingRecipients={loadingRecipients} />
+      )}
+
+      {showTestSend && (
+        <TestSendModal
+          shop={shop}
+          campaignId={campaign.id}
+          onClose={() => setShowTestSend(false)}
+          showToast={toast}
+        />
       )}
 
       {showDelete && (
@@ -237,6 +263,9 @@ function SentCampaignView({ campaign, recipients, loadingRecipients }: {
                     <span className={`inline-flex px-2 py-0.5 rounded text-xs font-semibold uppercase ${recipientStatusStyle(r.status)}`}>
                       {r.status}
                     </span>
+                    {r.status === "failed" && r.error && (
+                      <p className="text-[11px] text-red-500 mt-1 max-w-md">{r.error}</p>
+                    )}
                   </td>
                 </tr>
               ))}

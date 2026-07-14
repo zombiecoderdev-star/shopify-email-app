@@ -2,7 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { normalizeAudienceFilter } from "@/lib/audience";
 
-const VALID_STATUSES = ["draft", "scheduled", "sending"];
+// "sending"/"sent"/"failed" can't be set via PUT — only the send flow's
+// atomic claim (campaignSend.ts) transitions into them.
+const VALID_STATUSES = ["draft", "scheduled"];
 const EDITABLE_STATUSES = ["draft", "scheduled"];
 
 // PUT /api/shopify/campaigns/[id]

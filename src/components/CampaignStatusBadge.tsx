@@ -3,6 +3,7 @@ const STYLES: Record<string, string> = {
   scheduled: "bg-blue-100 text-blue-700",
   sending: "bg-amber-100 text-amber-700",
   sent: "bg-green-100 text-green-700",
+  failed: "bg-red-100 text-red-700",
 };
 
 export default function CampaignStatusBadge({ status }: { status: string }) {

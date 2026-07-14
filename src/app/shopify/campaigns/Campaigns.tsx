@@ -8,13 +8,14 @@ import {
   ChevronUp, ChevronDown, ChevronsUpDown,
 } from "lucide-react";
 import DeleteConfirmModal from "@/components/DeleteConfirmModal";
+import ConfirmActionModal from "@/components/ConfirmActionModal";
 import CampaignStatusBadge from "@/components/CampaignStatusBadge";
 import Pagination, { usePagination } from "@/components/Pagination";
 
 type Campaign = {
   id: string;
   name: string;
-  status: "draft" | "scheduled" | "sending" | "sent";
+  status: "draft" | "scheduled" | "sending" | "sent" | "failed";
   scheduled_at: string | null;
   sent_at: string | null;
   recipient_count: number;
@@ -49,6 +50,8 @@ export default function Campaigns() {
   const [sortDir, setSortDir] = useState<SortDir>(null);
   const [deleteCampaign, setDeleteCampaign] = useState<Campaign | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [sendCampaignTarget, setSendCampaignTarget] = useState<Campaign | null>(null);
+  const [sendingCampaign, setSendingCampaign] = useState(false);
 
   const shop = new URLSearchParams(window.location.search).get("shop") || "";
   const toast = (msg: string, opts?: { isError?: boolean }) => shopify.toast.show(msg, opts);
@@ -90,6 +93,25 @@ export default function Campaigns() {
   const sorted = getSorted(campaigns);
   const { page, perPage, setPage, setPerPage, paginate } = usePagination(sorted.length, [sortKey, sortDir]);
   const paginated = paginate(sorted);
+
+  async function handleSend(c: Campaign) {
+    setSendingCampaign(true);
+    try {
+      const res = await fetch(`/api/shopify/campaigns/${c.id}/send?shop=${shop}`, { method: "POST" });
+      const data = await res.json();
+      if (res.ok) {
+        toast(data.message); // includes sent/failed counts
+      } else {
+        toast(data.error || "Send failed", { isError: true });
+      }
+      await loadCampaigns(); // status changed either way (sent/failed) — refresh
+    } catch {
+      toast("Send failed", { isError: true });
+    } finally {
+      setSendingCampaign(false);
+      setSendCampaignTarget(null);
+    }
+  }
 
   async function handleDelete(c: Campaign) {
     setDeleting(true);
@@ -181,7 +203,7 @@ export default function Campaigns() {
                     </td>
                     <td className="px-4 py-3"><CampaignStatusBadge status={c.status} /></td>
                     <td className="px-4 py-3 text-gray-500">{c.templates?.name || "—"}</td>
-                    <td className="px-4 py-3 text-gray-500">{c.status === "sent" ? c.recipient_count : "—"}</td>
+                    <td className="px-4 py-3 text-gray-500">{c.status === "sent" || c.status === "failed" ? c.recipient_count : "—"}</td>
                     <td className="px-4 py-3 text-gray-500 text-xs">
                       {c.status === "sent" ? formatDate(c.sent_at) : c.status === "scheduled" ? formatDate(c.scheduled_at) : "—"}
                     </td>
@@ -191,9 +213,14 @@ export default function Campaigns() {
                           <Eye size={14} />
                         </ActionBtn>
                         {EDITABLE_STATUSES.includes(c.status) && (
-                          <ActionBtn title="Delete campaign" onClick={() => setDeleteCampaign(c)} className="hover:bg-red-50 hover:text-red-500">
-                            <Trash2 size={14} />
-                          </ActionBtn>
+                          <>
+                            <ActionBtn title="Send campaign now" onClick={() => setSendCampaignTarget(c)} className="hover:bg-green-50 hover:text-green-600">
+                              <Send size={14} />
+                            </ActionBtn>
+                            <ActionBtn title="Delete campaign" onClick={() => setDeleteCampaign(c)} className="hover:bg-red-50 hover:text-red-500">
+                              <Trash2 size={14} />
+                            </ActionBtn>
+                          </>
                         )}
                       </div>
                     </td>
@@ -206,6 +233,19 @@ export default function Campaigns() {
 
         <Pagination page={page} perPage={perPage} total={sorted.length} onPageChange={setPage} onPerPageChange={setPerPage} />
       </div>
+
+      {sendCampaignTarget && (
+        <ConfirmActionModal
+          title="Send Campaign Now?"
+          message={`"${sendCampaignTarget.name}" will be sent immediately via email to every subscribed contact in its audience. This cannot be undone.`}
+          confirmLabel="Send Campaign"
+          loadingLabel="Sending..."
+          tone="success"
+          loading={sendingCampaign}
+          onConfirm={() => handleSend(sendCampaignTarget)}
+          onCancel={() => setSendCampaignTarget(null)}
+        />
+      )}
 
       {deleteCampaign && (
         <DeleteConfirmModal

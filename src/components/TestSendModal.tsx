@@ -5,14 +5,20 @@ import { X, Send, Loader2 } from "lucide-react";
 
 type Props = {
   shop: string;
-  templateId: string;
+  // Exactly one of these: templateId tests a saved template
+  // (/api/shopify/templates/test-send), campaignId tests a campaign's
+  // rendered email (/api/shopify/campaigns/[id]/test-send — its own subject
+  // + template, no status/recipients/credits side effects).
+  templateId?: string;
+  campaignId?: string;
   onClose: () => void;
   showToast: (msg: string, opts?: { isError?: boolean }) => void;
 };
 
-// Stub only — no ESP integration yet (#9). Logs the attempt server-side and
-// shows the returned message; never claims the email actually sent.
-export default function TestSendModal({ shop, templateId, onClose, showToast }: Props) {
+// Sends one real email through the configured ESP (AWS SES). Subject to SES
+// sandbox restrictions — sends to unverified addresses fail until production
+// access is granted (see HANDOFF.md's ESP section).
+export default function TestSendModal({ shop, templateId, campaignId, onClose, showToast }: Props) {
   const [email, setEmail] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
@@ -22,17 +28,23 @@ export default function TestSendModal({ shop, templateId, onClose, showToast }: 
     setError("");
     setSending(true);
     try {
-      const res = await fetch("/api/shopify/templates/test-send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ shop, template_id: templateId, test_email: email }),
-      });
+      const res = campaignId
+        ? await fetch(`/api/shopify/campaigns/${campaignId}/test-send`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ shop, email }),
+          })
+        : await fetch("/api/shopify/templates/test-send", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ shop, template_id: templateId, test_email: email }),
+          });
       const data = await res.json();
       if (res.ok) {
         showToast(data.message);
         onClose();
       } else {
-        setError(data.error || "Failed to log test send");
+        setError(data.error || "Test send failed");
       }
     } catch {
       setError("Something went wrong");
@@ -52,7 +64,7 @@ export default function TestSendModal({ shop, templateId, onClose, showToast }: 
           <div>
             <h2 className="text-base font-bold text-gray-900">Send Test Email</h2>
             <p className="text-xs text-gray-400 mt-0.5">
-              ESP integration required to actually deliver — this just logs the attempt.
+              Sends one real email via the configured ESP — in SES sandbox mode the address must be verified.
             </p>
           </div>
           <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100">

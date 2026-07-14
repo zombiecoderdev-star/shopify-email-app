@@ -33,14 +33,16 @@ export type AudienceContact = {
   email: string;
   first_name: string | null;
   last_name: string | null;
+  subscribed: boolean;
 };
 
 // Resolves an audience_filter (any shape — legacy rows included) to the
 // contact fields needed to actually send mail (email + name for
-// personalization). Used by campaign sending.
+// personalization, subscribed so the send path can enforce consent). Used
+// by campaign sending.
 export async function resolveAudienceContacts(shopId: string, rawFilter: unknown): Promise<AudienceContact[]> {
   const query = applyAudienceFilter(
-    supabaseAdmin.from("contacts").select("id, email, first_name, last_name").eq("shop_id", shopId),
+    supabaseAdmin.from("contacts").select("id, email, first_name, last_name, subscribed").eq("shop_id", shopId),
     normalizeAudienceFilter(rawFilter)
   );
   const { data, error } = await query;

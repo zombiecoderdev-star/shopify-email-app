@@ -130,7 +130,8 @@ shopify-email-app/
 │   ├── remove_membership_migration.sql     # Run separately — drops membership columns/table
 │   ├── campaigns_migration.sql             # Run separately — adds campaigns.audience_filter/recipient_count/updated_at, campaign_recipients.created_at
 │   ├── esp_migration.sql                   # Run separately — adds campaign_recipients.complained_at
-│   └── tags_migration.sql                  # Run separately — contacts.tags NOT NULL text[] + normalize existing values + GIN index
+│   ├── tags_migration.sql                  # Run separately — contacts.tags NOT NULL text[] + normalize existing values + GIN index
+│   └── campaign_send_migration.sql         # Run separately — adds campaign_recipients.error (per-recipient failure message)
 ├── src/
 │   ├── middleware.ts                  # CSP for /shopify/*, auth guard for /admin/*
 │   ├── lib/
@@ -161,7 +162,7 @@ shopify-email-app/
 │   │   ├── ImportExportModal.tsx     # CSV import (3-step) + export with filter
 │   │   ├── TemplateEditor.tsx        # Block-based email editor (add/reorder/edit/preview) — text block uses TipTap
 │   │   ├── TemplateGallery.tsx       # "Start from template" gallery + "Generate with AI" (full) modal
-│   │   ├── TestSendModal.tsx         # Test-send modal — now sends a real email via the ESP, unchanged UI
+│   │   ├── TestSendModal.tsx         # Test-send modal — real ESP send; takes templateId OR campaignId (campaign test-send)
 │   │   ├── CampaignWizard.tsx        # 4-step campaign builder (Basics/Template/Audience/Review) — shared by new + edit
 │   │   └── CampaignStatusBadge.tsx   # draft/scheduled/sending/sent badge — shared by list + detail pages
 │   └── app/
@@ -202,7 +203,7 @@ shopify-email-app/
 │       │   │   │   └── NewCampaign.tsx   # Create page — header + CampaignWizard (create mode)
 │       │   │   └── [id]/
 │       │   │       ├── page.tsx          # SSR-disabled wrapper — detail
-│       │   │       └── CampaignDetail.tsx # draft/scheduled -> CampaignWizard (edit mode) + Delete; sent -> read-only summary + recipients + real bounce/complaint/failed analytics
+│       │   │       └── CampaignDetail.tsx # draft/scheduled -> CampaignWizard (edit mode) + Send Test + Delete; sent/failed -> read-only summary + recipients (with per-recipient error) + real bounce/complaint/failed analytics
 │       │   └── sending/
 │       │       ├── page.tsx          # SSR-disabled wrapper
 │       │       └── Sending.tsx       # ESP_PROVIDER/from-email display, sandbox status heuristic, test-send button
@@ -247,7 +248,8 @@ shopify-email-app/
 │               │   ├── [id]/route.ts              # PUT — update, DELETE (draft/scheduled only)
 │               │   ├── [id]/recipients/route.ts   # GET ?shop= — recipient list for the sent-campaign view
 │               │   ├── audience-count/route.ts    # GET ?shop= — counts for the 4 fixed segments; POST { shop, audience_filter } — count for ANY filter (tag live count)
-│               │   ├── send/route.ts               # POST { campaign_id } — real send (campaignSend.ts), surfaces sent/failed counts
+│               │   ├── [id]/send/route.ts          # POST ?shop= — real send (campaignSend.ts); 409 on double-send, surfaces sent/failed counts
+│               │   ├── [id]/test-send/route.ts     # POST { shop, email } — one rendered test email, no status/recipients/credits side effects
 │               │   └── process-scheduled/route.ts  # GET/POST — cron-target, not wired to a scheduler yet
 │               └── sending/
 │                   └── status/route.ts   # GET — ESP_PROVIDER + masked from-email + sandbox heuristic (GetSendQuotaCommand), no secrets
@@ -299,6 +301,12 @@ instead of the dynamic segments table; see Campaigns section below.
 `text` with no enum/check constraint, so the new `"failed"` and
 `"complained"` status values (see ESP section below) needed no schema
 change of their own.
+
+**Run `db/campaign_send_migration.sql` separately** — adds nullable `error`
+to `campaign_recipients` so a failed send stores the ESP's error message per
+recipient (shown under the status badge in the sent-campaign recipient
+list). Written and read defensively (retry-without-column) until the
+migration runs, per the optional-column convention above.
 
 **Run `db/tags_migration.sql` separately** — enforces `contacts.tags` as
 `text[] NOT NULL DEFAULT '{}'` (defensively converting a legacy text column
@@ -639,7 +647,7 @@ ngrok http 3000 --request-header-add "ngrok-skip-browser-warning: true"
 | 7 | Scheduling | 🟡 Processing logic done, cron trigger not wired up — see Campaigns section |
 | 8 | Automation flows (journey builder + tick engine) | ⬜ |
 | 9 | ESP integration (AWS SES) | ✅ DONE — open/click tracking is a known gap, pending further SES event configuration (see ESP Integration section) |
-| 10 | Billing + email credits (Shopify Billing API). Shop-level free/paid tracking lives in `/admin` using the existing `billing_plans` + `shop_subscriptions` tables — not a per-contact concept. (Per-contact membership tiers were built and then removed; see git history.) | ⬜ |
+| 10 | Billing + email credits (Shopify Billing API). Shop-level free/paid tracking lives in `/admin` using the existing `billing_plans` + `shop_subscriptions` tables — not a per-contact concept. (Per-contact membership tiers were built and then removed; see git history.) **Campaign sends now write `email_credits_ledger` debits and decrement `shops.credits_balance`** (see Campaigns → Real send) — plans, purchase flow, and balance enforcement are still unbuilt; nothing stops a send at 0 credits yet. | ⬜ |
 | 11 | GDPR webhooks + compliance | ⬜ |
 
 **Note for #10:** AI template generation (`src/app/api/shopify/templates/ai-generate/route.ts`)
@@ -665,27 +673,32 @@ sandbox mode caveats, and bounce/complaint handling.
 
 ### Status lifecycle
 ```
-draft ──────┐
-            ├─► sending ─► sent   (immediate "Send Now")
-scheduled ──┘
+draft ──────┐                    ┌─► sent     (≥1 recipient succeeded, or 0 recipients matched)
+            ├─► sending ─────────┤
+scheduled ──┘   (atomic claim)   └─► failed   (every recipient failed)
    ▲
-   └─ process-scheduled route flips scheduled → sending → sent once scheduled_at <= now()
+   └─ process-scheduled route runs the same claim + send once scheduled_at <= now()
 ```
-- **draft** — not scheduled, not sent. Editable, deletable.
-- **scheduled** — `scheduled_at` set. Editable, deletable. Picked up by
-  `process-scheduled` once due.
-- **sending** — transient: set the instant "Send Now" is clicked or a
-  scheduled campaign becomes due, immediately followed by the send call in
-  the same request. Not editable/deletable (in practice you'll rarely
-  observe this status at rest, since the send loop runs synchronously in
-  the same request — see the ESP section for why it's sequential, not
-  parallel).
+- **draft** — not scheduled, not sent. Editable, deletable, sendable.
+- **scheduled** — `scheduled_at` set. Editable, deletable, sendable. Picked
+  up by `process-scheduled` once due.
+- **sending** — transient, entered ONLY via campaignSend.ts's **atomic
+  claim** (`UPDATE ... WHERE status IN ('draft','scheduled')`): a
+  double-click or an overlapping cron tick finds zero claimable rows and
+  gets a 409 instead of a duplicate send. The create/PUT routes refuse to
+  set `sending`/`sent`/`failed` directly for the same reason. Not
+  editable/deletable.
 - **sent** — terminal. `sent_at` + `recipient_count` set once every send has
   been *attempted* (not necessarily succeeded — partial failures are normal,
-  especially in AWS SES sandbox mode). `campaign_recipients` rows written
-  with a per-contact outcome (`sent` or `failed`, later possibly `bounced`/
-  `complained`/`delivered` via the SNS webhook). View-only from here — no
-  more edits, no delete.
+  especially in AWS SES sandbox mode). `campaign_recipients` rows carry the
+  per-contact outcome (`sent` or `failed` + `error`, later possibly
+  `bounced`/`complained`/`delivered` via the SNS webhook). View-only.
+- **failed** — terminal: every single recipient failed (the norm in sandbox
+  mode when no recipient is a verified address). `sent_at` stays null,
+  `recipient_count` records what was attempted. View-only, red badge; the
+  detail page shows per-recipient error messages. Not re-sendable — recreate
+  the campaign (or loosen `SENDABLE_STATUSES` in `[id]/send/route.ts` if
+  retry-from-failed is ever wanted).
 
 ### `audience_filter` JSONB shape (current — discriminated union)
 ```json
@@ -752,24 +765,67 @@ prop present = edit/PUT, absent = create/POST):
    that means "navigate to the list" (new) or "reload in place" (edit).
 
 ### Real send (`src/lib/campaignSend.ts` — `sendCampaign`)
-Shared by `POST .../send` (manual "Send Now") and `process-scheduled`:
-resolves `audience_filter` to full contact records (`resolveAudienceContacts`
-— email + name, not just ids), then for each contact **sequentially**
-renders the campaign's template with that contact's personalization tags
-(`renderTemplateHtml` + `resolveTags`, see ESP section) and calls
-`sendEmail()`. Every attempt gets its own `campaign_recipients` row —
-`status: "sent"` (with `esp_message_id`) or `status: "failed"` — so a
-partial failure is fully auditable per-contact, not just a lump count.
-Once every contact has been attempted, updates the campaign
-(`status: "sent"`, `sent_at`, `recipient_count`) and logs a summary to
-`webhook_logs` (`source: "esp"`, `topic: "campaign_send"`). Throws (caller
-returns 400) if the campaign doesn't exist, has no template, or is already
-sent, so a scheduled campaign can't be double-processed. `POST .../send`'s
-response includes `sent_count`/`failed_count` and a message that's honest
-about partial failure — e.g. *"Campaign sent to 3 of 10 recipients — 7
-failed"* — rather than a flat success/fail, since AWS SES sandbox mode
-means partial (or total) failure is the expected default until production
-access is granted.
+Shared by `POST /api/shopify/campaigns/[id]/send?shop=` (manual send — the
+route validates shop ownership + status first: 404 wrong shop/campaign,
+409 already sending/sent, 400 missing template/subject or terminal
+`failed`) and `process-scheduled`. Flow:
+1. Validate (exists, has template + subject), then **atomically claim**
+   draft/scheduled → `sending` (see Status lifecycle — this is the
+   double-send guard; a lost race throws `CampaignSendConflictError`,
+   which the route maps to 409).
+2. Resolve the audience (`resolveAudienceContacts`) and keep only contacts
+   with `subscribed = true` **and** a plausible email. **Consent is
+   enforced at send time regardless of audience type** — the "All
+   contacts"/"Unsubscribed list" segments and hand-picked unsubscribed
+   contacts still appear in wizard counts (with red warnings), but are
+   skipped by the actual send, so the preview count can exceed the
+   attempted count.
+3. Insert one `campaign_recipients` row per recipient with
+   `status: "pending"` BEFORE any send, so a crash mid-send leaves an
+   auditable pending/attempted trail.
+4. Send in **batches of 5 with a ~1.1s pause between batches** (SES
+   enforces a per-account max send rate — 1/sec in sandbox, 14/sec default
+   production — so full parallelism would just trade sends for throttling
+   errors; throttled sends surface as per-recipient failures, not crashes).
+   Each recipient's template + subject render with their own
+   `{{first_name}}`/`{{last_name}}`/`{{shop_name}}` values.
+5. Flip each row to `sent` (+ `esp_message_id`, `sent_at`) or `failed`
+   (+ `error` message — written defensively until
+   `db/campaign_send_migration.sql` runs).
+6. Finish the campaign: `sent` (or `failed` if every recipient failed),
+   `recipient_count`, `sent_at`, and a `webhook_logs` summary
+   (`topic: "campaign_send"`).
+7. **Credits**: one append-only `email_credits_ledger` entry per campaign
+   send (`change: -sent_count`, `reason: "campaign_send"`,
+   `reference_id: campaign_id` — failed sends aren't billed, 0-sent runs
+   write no entry) and `shops.credits_balance` is decremented to match
+   (the schema's "kept in sync by application logic" contract — this is
+   currently the only writer).
+
+The response includes `sent_count`/`failed_count`/`status` and a message
+that's honest about partial failure — e.g. *"Campaign sent to 3 of 10
+recipients — 7 failed"*.
+
+### Campaign test send (`POST /api/shopify/campaigns/[id]/test-send`)
+Body `{ shop, email }` — sends ONE rendered copy of the campaign's email
+(its subject + template, tags resolved against sample values) via the ESP.
+Touches nothing else: no status change, no recipient rows, no credits, and
+no SES message tags (so a bounced test can't be mistaken for a real
+recipient event by the SNS webhook). Surfaced as the "Send Test" button on
+the campaign detail page (draft/scheduled), reusing `TestSendModal` — the
+modal now takes `templateId` OR `campaignId` and picks the endpoint.
+
+### Send buttons in the UI
+- **Campaign list** (`Campaigns.tsx`): per-row ✈ Send action on
+  draft/scheduled campaigns → `ConfirmActionModal` (green "Send Campaign
+  Now?" confirm) → `[id]/send` → toasts the sent/failed message and
+  refreshes the list.
+- **Wizard "Send Now"** (`CampaignWizard.tsx`): persists the campaign as a
+  DRAFT first, then calls `[id]/send` — the route owns the → sending
+  transition, so a request that dies mid-way leaves a recoverable draft
+  instead of a campaign stuck in "sending" (previously the wizard itself
+  wrote status "sending" before calling the old flat `POST .../send`
+  route, which has been removed).
 
 ### Scheduling (#7 — processing logic done, trigger not wired up)
 `GET`/`POST /api/shopify/campaigns/process-scheduled` finds every campaign
@@ -925,11 +981,13 @@ also exported and used un-escaped for the plain-text subject line.
   template via `renderTemplateHtml` and calls `sendEmail()` for real.
   `template_id` is optional; omitted, it sends a small hardcoded message
   instead, which is what the Sending & ESP page's connection-check uses.
-- **Campaign send** (`src/lib/campaignSend.ts` → `sendCampaign()`) — real
-  per-contact send with personalization, sequential (not parallel — SES
-  enforces an account-wide max send rate, as low as 1/sec in sandbox mode;
-  see `GetSendQuotaCommand` in the Sending & ESP page). See the Campaigns
-  section above for the full status-transition and partial-failure details.
+- **Campaign send** (`src/lib/campaignSend.ts` → `sendCampaign()`, via
+  `POST /api/shopify/campaigns/[id]/send?shop=`) — real per-contact send
+  with personalization, batched with a delay between batches (not fully
+  parallel — SES enforces an account-wide max send rate, as low as 1/sec in
+  sandbox mode; see `GetSendQuotaCommand` in the Sending & ESP page). See
+  the Campaigns section above for the full status-transition,
+  double-send-guard, credits, and partial-failure details.
 - **Scheduled processing** (`process-scheduled`) — no structural change
   needed; it already called the shared send function, which is now real.
 
@@ -1043,3 +1101,4 @@ Read-only (env vars aren't editable from the UI in this task):
 - `feat: email template builder with TipTap, starter gallery, and AI generation`
 - `feat: campaigns with scheduling stub, template AI generation with Gemini/Anthropic toggle, admin contacts, sidebar shop-param fix`
 - `feat: AWS SES email sending (ESP integration) + contact tagging with tag/specific-contact campaign audiences`
+- `feat: campaign send upgrade — atomic 409 double-send guard, batched SES sends, pending recipient rows with error capture, credits ledger, failed status, campaign test-send`
