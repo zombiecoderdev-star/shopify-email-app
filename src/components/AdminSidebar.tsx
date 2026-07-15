@@ -7,7 +7,7 @@ import { supabaseBrowser } from "@/lib/supabaseBrowser";
 import {
   Mail, LayoutDashboard, Store, Users,
   CreditCard, Settings, LogOut, ChevronDown,
-  ChevronRight, ChevronLeft, CheckCircle, XCircle,
+  ChevronRight, ChevronLeft, CheckCircle, XCircle, Clock,
 } from "lucide-react";
 
 const STORAGE_KEY = "admin-sidebar-collapsed";
@@ -23,6 +23,7 @@ const NAV = [
   { label: "Dashboard",    href: "/admin/dashboard", icon: LayoutDashboard },
   { label: "All Shops",    href: "/admin/shops",     icon: Store },
   { label: "Contacts",     href: "/admin/contacts",  icon: Users },
+  { label: "Cron Monitor", href: "/admin/cron",      icon: Clock },
   { label: "Billing",      href: "/admin/billing",   icon: CreditCard },
   { label: "Settings",     href: "/admin/settings",  icon: Settings },
 ];

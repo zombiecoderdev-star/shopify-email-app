@@ -105,6 +105,7 @@ AWS_SES_ACCESS_KEY_ID=            # IAM user/role with ses:SendEmail + ses:GetSe
 AWS_SES_SECRET_ACCESS_KEY=
 AWS_SES_FROM_EMAIL=               # Must be a verified identity (email or domain) in that SES region
 AWS_SES_CONFIGURATION_SET=        # Optional — name of the config set from the ESP section's step 4; sends work without it, but bounce/complaint/delivery events won't reach /api/webhooks/ses unless it's set
+CRON_SECRET=                      # Shared secret for /api/cron/tick and /api/shopify/campaigns/process-scheduled — sent as the `x-cron-secret` header
 ```
 **Reminder: before going live, set `AI_PROVIDER=anthropic` in the production env.**
 Gemini is for free-tier dev/testing only — don't ship on it.
@@ -131,7 +132,8 @@ shopify-email-app/
 │   ├── campaigns_migration.sql             # Run separately — adds campaigns.audience_filter/recipient_count/updated_at, campaign_recipients.created_at
 │   ├── esp_migration.sql                   # Run separately — adds campaign_recipients.complained_at
 │   ├── tags_migration.sql                  # Run separately — contacts.tags NOT NULL text[] + normalize existing values + GIN index
-│   └── campaign_send_migration.sql         # Run separately — adds campaign_recipients.error (per-recipient failure message)
+│   ├── campaign_send_migration.sql         # Run separately — adds campaign_recipients.error (per-recipient failure message)
+│   └── cron_migration.sql                  # Run separately — adds cron_jobs + cron_runs (universal cron framework), seeds process_scheduled_campaigns
 ├── src/
 │   ├── middleware.ts                  # CSP for /shopify/*, auth guard for /admin/*
 │   ├── lib/
@@ -147,7 +149,12 @@ shopify-email-app/
 │   │   ├── campaignSend.ts           # sendCampaign() — real per-contact send, shared by send/route.ts and process-scheduled/route.ts
 │   │   ├── espProvider.ts            # sendEmail() — AWS SES switch via ESP_PROVIDER
 │   │   ├── renderTemplateHtml.ts     # Server-safe (no React) block-to-HTML renderer for real sends
-│   │   └── snsVerify.ts              # verifySnsSignature() — manual SNS signature verification
+│   │   ├── snsVerify.ts              # verifySnsSignature() — manual SNS signature verification
+│   │   ├── cronAuth.ts               # verifyCronSecret() — shared CRON_SECRET header check for cron-facing routes
+│   │   ├── cronRunner.ts             # runCronJob() — universal execution wrapper (stale-run healing, concurrency cap, cron_runs logging)
+│   │   └── cronJobs/
+│   │       ├── registry.ts               # CRON_JOB_REGISTRY — job_key -> handler map, shared by tick + admin routes
+│   │       └── processScheduledCampaigns.ts # Extracted campaign-scheduler logic (handlerFn for the cron framework)
 │   ├── config/
 │   │   └── starterTemplates.ts       # Static starter template gallery data (app-level, not DB)
 │   ├── components/
@@ -162,6 +169,9 @@ shopify-email-app/
 │   │   ├── ImportExportModal.tsx     # CSV import (3-step) + export with filter
 │   │   ├── TemplateEditor.tsx        # Block-based email editor (add/reorder/edit/preview) — text block uses TipTap
 │   │   ├── TemplateGallery.tsx       # "Start from template" gallery + "Generate with AI" (full) modal
+│   │   ├── CronRunStatusBadge.tsx    # running/success/failed/timeout/skipped badge — same style convention as CampaignStatusBadge
+│   │   ├── EditCronScheduleModal.tsx # Edit a cron job's schedule_type/interval/max_concurrent_runs/timeout_seconds/is_active
+│   │   ├── CronRunDetailPanel.tsx    # Slide-in panel (ViewCustomerPanel pattern) — full request_payload/response/error JSON + Re-run button
 │   │   ├── TestSendModal.tsx         # Test-send modal — real ESP send; takes templateId OR campaignId (campaign test-send)
 │   │   ├── CampaignWizard.tsx        # 4-step campaign builder (Basics/Template/Audience/Review) — shared by new + edit
 │   │   └── CampaignStatusBadge.tsx   # draft/scheduled/sending/sent badge — shared by list + detail pages
@@ -175,9 +185,10 @@ shopify-email-app/
 │       │       ├── layout.tsx        # AdminSidebar wrapper
 │       │       ├── dashboard/page.tsx # Stats + all shops table (summary view)
 │       │       ├── shops/page.tsx    # Full shop management page (search, filter, sort, CSV export)
-│       │       └── contacts/
-│       │           ├── page.tsx          # Suspense wrapper (AdminContacts reads ?shop_id=)
-│       │           └── AdminContacts.tsx # Cross-shop contacts page — shop selector + full CRUD
+│       │       ├── contacts/
+│       │       │   ├── page.tsx          # Suspense wrapper (AdminContacts reads ?shop_id=)
+│       │       │   └── AdminContacts.tsx # Cross-shop contacts page — shop selector + full CRUD
+│       │       └── cron/page.tsx     # Cron Monitor — jobs panel + run logs panel, no App Bridge (local toast, like contacts)
 │       ├── shopify/
 │       │   ├── layout.tsx            # Shopify layout — Sidebar wrapper
 │       │   ├── dashboard/
@@ -215,14 +226,27 @@ shopify-email-app/
 │           │   ├── shops/
 │           │   │   ├── route.ts      # GET — all shops + stats + billing plan + last synced (admin only)
 │           │   │   └── [id]/status/route.ts # PATCH — toggle a shop's is_active
-│           │   └── contacts/         # Admin mirror of /api/shopify/customers/*, keyed by shop_id
-│           │       ├── route.ts        # GET ?shop_id= — list
-│           │       ├── create/route.ts
-│           │       ├── update/route.ts
-│           │       ├── delete/route.ts
-│           │       ├── bulk-delete/route.ts
-│           │       ├── import/route.ts
-│           │       └── export/route.ts # GET — streams CSV, no row cap (unlike the list route)
+│           │   ├── contacts/         # Admin mirror of /api/shopify/customers/*, keyed by shop_id
+│           │   │   ├── route.ts        # GET ?shop_id= — list
+│           │   │   ├── create/route.ts
+│           │   │   ├── update/route.ts
+│           │   │   ├── delete/route.ts
+│           │   │   ├── bulk-delete/route.ts
+│           │   │   ├── import/route.ts
+│           │   │   └── export/route.ts # GET — streams CSV, no row cap (unlike the list route)
+│           │   └── cron/             # Admin monitoring API for the universal cron framework
+│           │       ├── jobs/
+│           │       │   ├── route.ts          # GET — all cron_jobs + currently_running_count + last_result
+│           │       │   └── [id]/
+│           │       │       ├── route.ts      # PATCH — schedule_type/interval/max_concurrent_runs/timeout_seconds/is_active
+│           │       │       └── run/route.ts  # POST — manual trigger via runCronJob(), respects max_concurrent_runs
+│           │       └── runs/
+│           │           ├── route.ts          # GET — paginated, ?job_key=&status=, truncated payload/response
+│           │           └── [id]/
+│           │               ├── route.ts     # GET — single run, full untruncated payload/response/error
+│           │               └── rerun/route.ts # POST — re-triggers the run's job, new cron_runs row linked via rerun_of
+│           ├── cron/
+│           │   └── tick/route.ts     # GET/POST — the ONE dispatcher an external cron service hits; claims + runs all due automatic jobs
 │           ├── webhooks/
 │           │   ├── customers/route.ts # POST — customers/create + update
 │           │   └── ses/route.ts       # POST — SNS bounce/complaint/delivery notifications, see ESP section
@@ -250,7 +274,7 @@ shopify-email-app/
 │               │   ├── audience-count/route.ts    # GET ?shop= — counts for the 4 fixed segments; POST { shop, audience_filter } — count for ANY filter (tag live count)
 │               │   ├── [id]/send/route.ts          # POST ?shop= — real send (campaignSend.ts); 409 on double-send, surfaces sent/failed counts
 │               │   ├── [id]/test-send/route.ts     # POST { shop, email } — one rendered test email, no status/recipients/credits side effects
-│               │   └── process-scheduled/route.ts  # GET/POST — cron-target, not wired to a scheduler yet
+│               │   └── process-scheduled/route.ts  # GET/POST — thin wrapper around runCronJob(), CRON_SECRET-protected; also reachable via /api/cron/tick
 │               └── sending/
 │                   └── status/route.ts   # GET — ESP_PROVIDER + masked from-email + sandbox heuristic (GetSendQuotaCommand), no secrets
 ```
@@ -597,7 +621,7 @@ whichever shop is selected instead of one merchant's own session.
 ### Admin Sidebar (`src/components/AdminSidebar.tsx`)
 - Logo + "Admin Panel" label
 - Collapsible (collapse/expand toggle, persisted in localStorage)
-- Nav: Dashboard, All Shops, Contacts, Billing, Settings
+- Nav: Dashboard, All Shops, Contacts, Cron Monitor, Billing, Settings
 - Collapsible "Installed Shops" list — each shop shows:
   - 🟢/🔴 active status dot
   - Shop name (`.myshopify.com` stripped)
@@ -644,7 +668,7 @@ ngrok http 3000 --request-header-add "ngrok-skip-browser-warning: true"
 | 5 | Email templates (builder + save/reuse) | ✅ DONE |
 | 6 | Campaigns (create, send, analytics) | ✅ DONE |
 | 6b | Contact tagging + tag / specific-contact campaign audiences | ✅ DONE — see Contact Tagging section; run `db/tags_migration.sql` |
-| 7 | Scheduling | 🟡 Processing logic done, cron trigger not wired up — see Campaigns section |
+| 7 | Scheduling | ✅ DONE — cron trigger now wired up via the universal cron framework, see Universal Cron Framework section |
 | 8 | Automation flows (journey builder + tick engine) | ⬜ |
 | 9 | ESP integration (AWS SES) | ✅ DONE — open/click tracking is a known gap, pending further SES event configuration (see ESP Integration section) |
 | 10 | Billing + email credits (Shopify Billing API). Shop-level free/paid tracking lives in `/admin` using the existing `billing_plans` + `shop_subscriptions` tables — not a per-contact concept. (Per-contact membership tiers were built and then removed; see git history.) **Campaign sends now write `email_credits_ledger` debits and decrement `shops.credits_balance`** (see Campaigns → Real send) — plans, purchase flow, and balance enforcement are still unbuilt; nothing stops a send at 0 credits yet. | ⬜ |
@@ -846,18 +870,16 @@ modal now takes `templateId` OR `campaignId` and picks the endpoint.
   wrote status "sending" before calling the old flat `POST .../send`
   route, which has been removed).
 
-### Scheduling (#7 — processing logic done, trigger not wired up)
-`GET`/`POST /api/shopify/campaigns/process-scheduled` finds every campaign
-with `status = "scheduled"` and `scheduled_at <= now()` and runs the same
-real send flow for each. Mirrors the `flow_runs.next_action_at` pattern
-already planned for automation flows (#8), so the architecture stays
-consistent once a real background worker exists. **This route is not
-wired up to actually run on a schedule** — it needs an external trigger
-(a cron job, Vercel Cron, a scheduled Supabase function, etc.) to call it
-periodically. No auth check on it yet either, since a cron trigger may not
-be able to send one; add a shared-secret header before exposing it publicly.
-For now it's manually triggerable (hit the URL) so the processing logic
-itself can be verified independent of a real scheduler.
+### Scheduling (#7 — DONE ✅, now driven by the universal cron framework)
+The actual campaign-processing logic (find `status = "scheduled"` +
+`scheduled_at <= now()`, run the real send flow for each) lives in
+`src/lib/cronJobs/processScheduledCampaigns.ts` — extracted so it can run
+as a `handlerFn` for `runCronJob()`. `GET`/`POST
+/api/shopify/campaigns/process-scheduled` is now a thin wrapper: check
+`CRON_SECRET`, call `runCronJob("process_scheduled_campaigns", "manual",
+null, processScheduledCampaigns)`, return its result. It's actually invoked
+on a schedule now via `/api/cron/tick` — see the Universal Cron Framework
+section below for the dispatcher, registry pattern, and admin monitoring UI.
 
 ---
 
@@ -914,6 +936,158 @@ See the Campaigns section above for the `audience_filter` JSONB union shape,
 the legacy-row fallback (`normalizeAudienceFilter`), and
 `src/lib/resolveAudience.ts` — the single place all six audience types
 resolve to contacts for both count previews and real sends.
+
+---
+
+## Universal Cron Framework (DONE ✅)
+
+Replaces the ad-hoc single-purpose scheduling from the campaign scheduler
+(#7) with a generic registry + execution log + admin monitoring UI + one
+dispatcher endpoint, so any future scheduled job (starting with the flow
+tick engine, #8) plugs into the same system instead of getting its own
+bespoke cron wiring.
+
+### Tables (`db/cron_migration.sql`)
+- **`cron_jobs`** — the registry. One row per distinct job: `job_key`
+  (unique, e.g. `"process_scheduled_campaigns"`), `name`/`description` for
+  the admin UI, `schedule_type` (`"manual"` | `"automatic"`),
+  `interval_type` (`"minutely"` | `"hourly"` | `"daily"` | `"weekly"` |
+  `"custom_minutes"`) + `interval_minutes` (the resolved minute-equivalent:
+  60/1440/10080 for hourly/daily/weekly, or the literal value for
+  `custom_minutes`), `max_concurrent_runs`, `timeout_seconds` (runs older
+  than this while still `"running"` get auto-marked `"timeout"` so they
+  stop blocking concurrency), `is_active`, `next_run_at`/`last_run_at`.
+- **`cron_runs`** — the universal execution log. Denormalizes `job_key` (so
+  history survives job deletion and admin queries skip a join),
+  `trigger_type` (`"manual"` | `"automatic"`), `triggered_by` (admin email
+  when manually triggered from `/admin`, else null), `status` (`"running"`
+  | `"success"` | `"failed"` | `"timeout"` | `"skipped"`), timing
+  (`started_at`/`finished_at`/`duration_ms`), `request_payload`/`response`/
+  `error` (jsonb/jsonb/text), and `rerun_of` (nullable uuid self-reference —
+  set when a run was created via the "Re-run" action, links back to the
+  run it re-ran).
+- Migration seeds one `cron_jobs` row for the existing campaign scheduler:
+  `process_scheduled_campaigns`, automatic, `custom_minutes` @ 5 min.
+
+### `src/lib/cronRunner.ts` — `runCronJob(jobKey, triggerType, triggeredBy, handlerFn, payload?)`
+The shared wrapper every cron-facing caller goes through instead of
+reimplementing bookkeeping:
+1. Loads the `cron_jobs` row by `job_key` — throws if it's not registered
+   (jobs are registered via migration/seed, never auto-created).
+2. If `is_active` is false: inserts a `"skipped"` `cron_runs` row and
+   returns early without calling the handler.
+3. **Auto-heals stale runs first** — any `"running"` row for this job
+   older than `timeout_seconds` flips to `"timeout"` before the
+   concurrency count runs, so a genuinely stuck run can't block forever.
+4. Counts current `"running"` rows for the job; at or above
+   `max_concurrent_runs`, inserts a `"skipped"` row (`response` notes "max
+   concurrent runs reached") and returns early — the handler never runs.
+5. Inserts a `"running"` row, calls `handlerFn(payload)` in try/catch —
+   the throw never escapes `runCronJob` itself, callers always get a
+   normal `{ status, response, error, durationMs, runId }` back, success
+   or failure.
+6. Updates `cron_jobs.last_run_at`. Does **not** touch `next_run_at` itself
+   — that's the tick dispatcher's job (step below), so a manually
+   triggered run never disturbs the automatic schedule.
+
+### `src/app/api/cron/tick/route.ts` — the single dispatcher
+The ONE endpoint an external cron service (cron-job.org, Vercel Cron, etc.)
+hits on a short interval (every 1 minute is the intended cadence).
+`GET`/`POST`, protected by the same `CRON_SECRET` header check as
+`process-scheduled` (see below — there is exactly one secret, reused
+everywhere, via `src/lib/cronAuth.ts`). Logic:
+1. Query `cron_jobs` where `is_active`, `schedule_type = "automatic"`,
+   `next_run_at <= now()`.
+2. For each due job, **atomically claim it and advance the schedule** in
+   one `UPDATE ... WHERE next_run_at <= now()` — a concurrent tick racing
+   the same row finds zero matching rows and skips instead of
+   double-running the cycle.
+3. For successfully claimed jobs, look up the handler in
+   `src/lib/cronJobs/registry.ts`'s `CRON_JOB_REGISTRY` map and call
+   `runCronJob(jobKey, "automatic", null, handler)` — **sequentially, not
+   in parallel**, so multiple jobs touching SES sends in the same tick
+   don't compound rate-limit throttling.
+4. Returns `{ ticked_at, jobs_run: [{ job_key, status, durationMs }],
+   jobs_skipped: [...] }`. Always 200 unless the `CRON_SECRET` check fails
+   (401).
+
+### Registry pattern — adding a future job (e.g. the #8 flow tick engine)
+`src/lib/cronJobs/registry.ts` exports `CRON_JOB_REGISTRY: Record<string,
+() => Promise<unknown>>` — imported by both the tick dispatcher and the
+admin "Run Now"/rerun routes, so there's exactly one place to register a
+handler. To add a job: (1) add a `cron_jobs` row via a new migration with
+its `job_key` + schedule, (2) write a plain no-arg async function shaped
+like `processScheduledCampaigns` (`src/lib/cronJobs/processScheduledCampaigns.ts`),
+(3) add it to the registry map keyed by the same `job_key`. No changes
+needed to the tick route, admin routes, or `runCronJob` itself.
+
+### `CRON_SECRET` (`src/lib/cronAuth.ts`)
+Both `/api/cron/tick` and `/api/shopify/campaigns/process-scheduled` check
+the same `x-cron-secret` header against `process.env.CRON_SECRET` via
+`verifyCronSecret(req)` — **only one secret to configure**, whichever
+route your external cron service actually calls. (The original
+process-scheduled route had explicitly *no* auth check yet — its old
+comment said "add one before wiring up a real scheduler" — this is that
+addition, introduced fresh rather than copied from an existing pattern.)
+
+### Admin API (`src/app/api/admin/cron/*`)
+All routes call `verifyAdminSession(req)` first, same as every other
+`/api/admin/*` route:
+- `GET /jobs` — every `cron_jobs` row + a live `currently_running_count`
+  (excludes runs stale past `timeout_seconds`) + `last_result` (the most
+  recent `cron_runs` row's status/timing).
+- `PATCH /jobs/[id]` — updates schedule fields; recomputes `next_run_at`
+  when switching manual→automatic or changing the interval while
+  automatic; manual clears `next_run_at` to null.
+- `POST /jobs/[id]/run` — manual trigger via `runCronJob()`, same registry
+  map as the tick dispatcher, same `max_concurrent_runs` enforcement.
+- `GET /runs` — paginated (`page`/`per_page`, same convention as
+  `/api/shopify/contacts`'s server-side pagination), filterable by
+  `?job_key=`/`?status=`, sorted by `started_at desc`.
+  `request_payload`/`response` are truncated (300-char JSON preview) for
+  the list view.
+- `GET /runs/[id]` — single run, full untruncated payload/response/error.
+- `POST /runs/[id]/rerun` — re-triggers the run's job via the same
+  `runCronJob()` path as "Run Now" (so `max_concurrent_runs` applies);
+  creates a fresh `cron_runs` row rather than reusing the old one, linked
+  back via `rerun_of`.
+
+### Admin UI — `/admin/cron` (`src/app/admin/(protected)/cron/page.tsx`)
+No App Bridge (same as `/admin/contacts`) — local toast (state +
+`setTimeout`, fixed-position banner), same pattern.
+- **Jobs panel**: name, schedule badge (Manual or "Every X" derived from
+  `interval_type`/`interval_minutes`), next run (relative time via a small
+  local `relativeTime()` helper), last-run status badge
+  (`CronRunStatusBadge` — same style/spinner convention as
+  `CampaignStatusBadge`'s "Sending" state, covering
+  running/success/failed/timeout/skipped), running-count vs. max,
+  active/inactive toggle (`PATCH .../is_active`), "Run Now" button
+  (disabled + shows a loading state while in flight; disabled with a
+  tooltip when at the concurrency cap), and an "Edit" action opening
+  `EditCronScheduleModal` (`PATCH` the full schedule).
+- **Run logs panel**: paginated table (`Pagination`/`usePagination`, same
+  as every other table) filterable by job/status, row click opens
+  `CronRunDetailPanel` — a slide-in following the `ViewCustomerPanel`
+  pattern, showing full `request_payload`/`response`/`error` as formatted
+  JSON, with a "Re-run" button on failed/timeout runs.
+- Auto-polls the jobs panel every ~5s while any job shows a running count
+  or a `"running"` last-result status — same lightweight polling pattern
+  as campaign send status; stops (and cleans up the interval) once
+  nothing is running.
+
+### External cron setup
+Only **ONE** cron-job.org job is needed now — hitting `/api/cron/tick`
+every 1 minute, with the `x-cron-secret` header set to `CRON_SECRET` —
+instead of one external job per scheduled feature. The dispatcher itself
+decides which registered jobs are actually due each tick.
+
+### Not run yet
+`db/cron_migration.sql` needs to be run in the Supabase SQL editor (like
+every other migration in this project) before `/admin/cron` or
+`/api/cron/tick` will work — until then, `cron_jobs`/`cron_runs` don't
+exist and those routes will 500. Verified `npx tsc --noEmit` is clean;
+full browser verification of the admin UI (running jobs, polling,
+rerun) is still pending the migration + a real admin login.
 
 ---
 
@@ -1121,4 +1295,6 @@ Read-only (env vars aren't editable from the UI in this task):
 - `feat: campaigns with scheduling stub, template AI generation with Gemini/Anthropic toggle, admin contacts, sidebar shop-param fix`
 - `feat: AWS SES email sending (ESP integration) + contact tagging with tag/specific-contact campaign audiences`
 - `feat: campaign send upgrade — atomic 409 double-send guard, batched SES sends, pending recipient rows with error capture, credits ledger, failed status, campaign test-send`
+- `feat: campaign status UX — In Queue/Sending labels with spinner, optimistic status on send, live polling until terminal status`
+- `feat: universal cron job framework — registry + execution log + single tick dispatcher + admin monitoring UI, replacing ad-hoc campaign scheduling`
 - `feat: polished campaign status display — In Queue/Sending labels with spinner, optimistic sending flip + 2s status polling on send`
