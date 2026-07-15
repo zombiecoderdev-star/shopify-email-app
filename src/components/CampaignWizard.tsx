@@ -39,6 +39,11 @@ type Props = {
   initialScheduledAt?: string | null;
   onSaved: () => void;
   showToast: (msg: string, opts?: { isError?: boolean }) => void;
+  // Optional hooks so a parent showing its own status badge (e.g.
+  // CampaignDetail) can flip to "sending" the instant the send POST fires,
+  // and revert if it fails outright rather than waiting on onSaved().
+  onSendStart?: () => void;
+  onSendRevert?: () => void;
 };
 
 const STEPS = [
@@ -67,6 +72,8 @@ export default function CampaignWizard({
   initialScheduledAt = null,
   onSaved,
   showToast,
+  onSendStart,
+  onSendRevert,
 }: Props) {
   const [initialFilter] = useState<AudienceFilter>(() => normalizeAudienceFilter(initialAudienceFilter));
 
@@ -296,6 +303,7 @@ export default function CampaignWizard({
       // double-send), so if this request dies mid-way the campaign is a
       // recoverable draft instead of being stuck in "sending".
       const campaign = await persistCampaign("draft", null);
+      onSendStart?.();
       const res = await fetch(`/api/shopify/campaigns/${campaign.id}/send?shop=${shop}`, {
         method: "POST",
       });
@@ -305,6 +313,7 @@ export default function CampaignWizard({
       onSaved();
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Send failed", { isError: true });
+      onSendRevert?.();
     } finally {
       setSaving(null);
     }

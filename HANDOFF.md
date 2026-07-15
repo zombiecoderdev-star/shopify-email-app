@@ -727,6 +727,25 @@ unsubscribed contacts trigger the same warning. `campaigns.segment_id`
 (FK to the `segments` table) is left in the schema untouched — this feature
 never reads or writes it.
 
+### Status badge display (`CampaignStatusBadge.tsx`)
+The DB status values (draft/scheduled/sending/sent/failed) are unchanged —
+this is a display-only relabel, nothing that reads raw `status` for logic
+(sort, filters, `EDITABLE_STATUSES`/`SENDABLE_STATUSES`, etc.) was touched:
+- `draft` → "Draft", `sent` → "Sent", `failed` → "Failed" (unchanged style)
+- `scheduled` → **"In Queue"** (existing blue style, just relabeled — it's
+  sitting in queue until `scheduled_at` is due)
+- `sending` → **"Sending"** with an animated `lucide-react` `Loader2` spinner
+  next to the label
+Both `Campaigns.tsx` (row action) and `CampaignWizard.tsx`'s Send Now (via
+`onSendStart`/`onSendRevert` props consumed by `CampaignDetail.tsx`)
+optimistically flip the displayed status to `sending` the instant the
+`/send` POST fires, then poll `GET /api/shopify/campaigns?shop=` every ~2s
+(60s timeout) so the badge flips to `Sent`/`Failed` without a manual
+refresh even though the `/send` route itself blocks until the batched send
+finishes. Reverts to the prior status on outright POST failure (network
+error or non-2xx) since the campaign never actually left draft/scheduled
+server-side in that case.
+
 ### Pages — `/shopify/campaigns`
 - **List** (`Campaigns.tsx`): sortable table (Name↕, Status↕, Scheduled/Sent
   date↕), "New Campaign" button, `Pagination`. Template name and recipient
@@ -1102,3 +1121,4 @@ Read-only (env vars aren't editable from the UI in this task):
 - `feat: campaigns with scheduling stub, template AI generation with Gemini/Anthropic toggle, admin contacts, sidebar shop-param fix`
 - `feat: AWS SES email sending (ESP integration) + contact tagging with tag/specific-contact campaign audiences`
 - `feat: campaign send upgrade — atomic 409 double-send guard, batched SES sends, pending recipient rows with error capture, credits ledger, failed status, campaign test-send`
+- `feat: polished campaign status display — In Queue/Sending labels with spinner, optimistic sending flip + 2s status polling on send`

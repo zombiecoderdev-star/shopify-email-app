@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import {
@@ -32,6 +32,9 @@ const COLUMNS: { label: string; key: SortKey }[] = [
 ];
 
 const EDITABLE_STATUSES = ["draft", "scheduled"];
+const TERMINAL_STATUSES = ["sent", "failed"];
+const POLL_INTERVAL_MS = 2000;
+const POLL_TIMEOUT_MS = 60000;
 
 function campaignDate(c: Campaign) {
   return c.sent_at || c.scheduled_at || c.created_at;
@@ -55,6 +58,49 @@ export default function Campaigns() {
 
   const shop = new URLSearchParams(window.location.search).get("shop") || "";
   const toast = (msg: string, opts?: { isError?: boolean }) => shopify.toast.show(msg, opts);
+
+  // Active poll intervals, keyed by campaign id, so a component unmount
+  // (e.g. navigating away mid-send) can clear all of them.
+  const pollTimers = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+
+  useEffect(() => {
+    return () => {
+      Object.values(pollTimers.current).forEach(clearInterval);
+    };
+  }, []);
+
+  function stopPolling(campaignId: string) {
+    const timer = pollTimers.current[campaignId];
+    if (timer) {
+      clearInterval(timer);
+      delete pollTimers.current[campaignId];
+    }
+  }
+
+  // Lightweight polling for live status while a send is in flight — the
+  // /send POST itself already resolves with the final status, but this
+  // covers the badge in case the request takes a while.
+  function pollCampaignStatus(campaignId: string) {
+    stopPolling(campaignId);
+    const startedAt = Date.now();
+    pollTimers.current[campaignId] = setInterval(async () => {
+      if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        stopPolling(campaignId);
+        return;
+      }
+      try {
+        const res = await fetch(`/api/shopify/campaigns?shop=${shop}`);
+        const data = await res.json();
+        const match: Campaign | undefined = (data.campaigns || []).find((c: Campaign) => c.id === campaignId);
+        if (match && TERMINAL_STATUSES.includes(match.status)) {
+          stopPolling(campaignId);
+          setCampaigns((prev) => prev.map((x) => (x.id === campaignId ? match : x)));
+        }
+      } catch {
+        // transient network hiccup — keep polling until timeout
+      }
+    }, POLL_INTERVAL_MS);
+  }
 
   async function loadCampaigns() {
     setLoading(true);
@@ -95,18 +141,29 @@ export default function Campaigns() {
   const paginated = paginate(sorted);
 
   async function handleSend(c: Campaign) {
+    const previousStatus = c.status;
     setSendingCampaign(true);
+    // Optimistic flip — badge shows "Sending" immediately instead of
+    // lingering on the pre-send status until the POST resolves.
+    setCampaigns((prev) => prev.map((x) => (x.id === c.id ? { ...x, status: "sending" } : x)));
+    pollCampaignStatus(c.id);
     try {
       const res = await fetch(`/api/shopify/campaigns/${c.id}/send?shop=${shop}`, { method: "POST" });
       const data = await res.json();
+      stopPolling(c.id);
       if (res.ok) {
         toast(data.message); // includes sent/failed counts
       } else {
         toast(data.error || "Send failed", { isError: true });
+        // Business-logic failure (e.g. 409 double-send, 400 not sendable) —
+        // the campaign never actually transitioned server-side, so revert.
+        setCampaigns((prev) => prev.map((x) => (x.id === c.id ? { ...x, status: previousStatus } : x)));
       }
       await loadCampaigns(); // status changed either way (sent/failed) — refresh
     } catch {
+      stopPolling(c.id);
       toast("Send failed", { isError: true });
+      setCampaigns((prev) => prev.map((x) => (x.id === c.id ? { ...x, status: previousStatus } : x)));
     } finally {
       setSendingCampaign(false);
       setSendCampaignTarget(null);

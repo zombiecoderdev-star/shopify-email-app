@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useAppBridge } from "@shopify/app-bridge-react";
@@ -37,6 +37,9 @@ type Recipient = {
 };
 
 const EDITABLE_STATUSES = ["draft", "scheduled"];
+const TERMINAL_STATUSES = ["sent", "failed"];
+const POLL_INTERVAL_MS = 2000;
+const POLL_TIMEOUT_MS = 60000;
 
 function formatDate(iso: string | null) {
   if (!iso) return "—";
@@ -58,6 +61,44 @@ export default function CampaignDetail() {
   const [showDelete, setShowDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [showTestSend, setShowTestSend] = useState(false);
+  // Optimistic "sending" flip for the header badge — set the instant the
+  // wizard's Send Now POST fires, cleared once `load()` reflects a terminal
+  // status (or reverted on hard failure). Independent of campaign.status so
+  // the wizard doesn't unmount mid-request.
+  const [optimisticSending, setOptimisticSending] = useState(false);
+  const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  function stopPolling() {
+    if (pollTimer.current) {
+      clearInterval(pollTimer.current);
+      pollTimer.current = null;
+    }
+  }
+
+  function startPolling() {
+    stopPolling();
+    const startedAt = Date.now();
+    pollTimer.current = setInterval(async () => {
+      if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        stopPolling();
+        return;
+      }
+      try {
+        const res = await fetch(`/api/shopify/campaigns?shop=${shop}`);
+        const data = await res.json();
+        const found: Campaign | undefined = (data.campaigns || []).find((c: Campaign) => c.id === params.id);
+        if (found && TERMINAL_STATUSES.includes(found.status)) {
+          stopPolling();
+          setCampaign(found);
+          setOptimisticSending(false);
+        }
+      } catch {
+        // transient network hiccup — keep polling until timeout
+      }
+    }, POLL_INTERVAL_MS);
+  }
+
+  useEffect(() => stopPolling, []);
 
   async function load() {
     setLoading(true);
@@ -136,7 +177,7 @@ export default function CampaignDetail() {
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-2xl font-bold text-gray-900">{campaign.name}</h1>
-            <CampaignStatusBadge status={campaign.status} />
+            <CampaignStatusBadge status={optimisticSending ? "sending" : campaign.status} />
           </div>
           <p className="text-sm text-gray-400 mt-1">
             {editable
@@ -175,8 +216,10 @@ export default function CampaignDetail() {
           initialTemplateId={campaign.template_id}
           initialAudienceFilter={campaign.audience_filter}
           initialScheduledAt={campaign.scheduled_at}
-          onSaved={load}
+          onSaved={() => { stopPolling(); setOptimisticSending(false); load(); }}
           showToast={toast}
+          onSendStart={() => { setOptimisticSending(true); startPolling(); }}
+          onSendRevert={() => { stopPolling(); setOptimisticSending(false); }}
         />
       ) : (
         <SentCampaignView campaign={campaign} recipients={recipients} loadingRecipients={loadingRecipients} />
